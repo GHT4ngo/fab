@@ -1,0 +1,20 @@
+# Local Postgres for development. The future "hub" will add `api` + `pipeline`
+# services here so the whole stack installs with `docker compose up`.
+services:
+  db:
+    image: postgres:16
+    container_name: fab-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
+      # No POSTGRES_DB on purpose: setup_db.py creates the `fab` database itself.
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - ./tmp/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

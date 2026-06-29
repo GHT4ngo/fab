@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Throwaway: download cache, backups, logs, local Postgres data
+tmp/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Frontend — independently version-controlled (its own git repo + GitHub remote).
+# The parent fab repo does not track it (see CLAUDE.md).
+retro-data-display/
+
+# dbt artifacts
+fab_dbt/target/
+fab_dbt/logs/
+fab_dbt/dbt_packages/
+
+# Stray logs
+*.log

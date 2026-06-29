@@ -1,0 +1,34 @@
+{
+  // Use the project venv for Python + dbt. The integrated terminal auto-activates it.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  // Load PG_* / API keys from .env for running & debugging Python.
+  "python.envFile": "${workspaceFolder}/.env",
+
+  // dbt: profiles.yml lives inside fab_dbt/ (dbt auto-discovers it from the project
+  // dir, so the dbt Power User extension just works). This env var also lets you run
+  // a bare `dbt run` from the repo root in the terminal.
+  "terminal.integrated.env.linux": {
+    "DBT_PROFILES_DIR": "${workspaceFolder}/fab_dbt"
+  },
+  "dbt.dbtPythonPathOverride": "${workspaceFolder}/.venv/bin/python",
+
+  // Keep the file tree and file-watcher focused on source, not generated/heavy dirs.
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  },
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/tmp/**": true,
+    "**/node_modules/**": true,
+    "**/fab_dbt/target/**": true,
+    "**/fab_dbt/logs/**": true
+  },
+  "search.exclude": {
+    "**/.venv": true,
+    "**/tmp": true,
+    "**/node_modules": true,
+    "**/fab_dbt/target": true
+  }
+}

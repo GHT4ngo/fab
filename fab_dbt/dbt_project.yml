@@ -1,0 +1,34 @@
+name: 'fab_dbt'
+version: '1.0.0'
+config-version: 2
+
+profile: 'fab_shop'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  fab_dbt:
+    silver:
+      +materialized: table
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold
+      gold_cards:
+        +post-hook:
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_name_trgm    ON {{ this }} USING gin (name gin_trgm_ops)"
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_set_id       ON {{ this }} (set_id)"
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_rarity       ON {{ this }} (rarity)"
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_foiling      ON {{ this }} (foiling)"
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_price_eur    ON {{ this }} (price_eur)"
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_price_sek    ON {{ this }} (price_sek)"
+          - "CREATE INDEX IF NOT EXISTS {{ this.name }}_type_trgm    ON {{ this }} USING gin (type_text gin_trgm_ops)"

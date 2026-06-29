@@ -1,0 +1,15 @@
+# dbt connection for the `fab_shop` profile. Reads the same .env vars the
+# Python scripts use. Run from this directory with:
+#   dbt run --profiles-dir .
+fab_shop:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('PG_HOST', 'localhost') }}"
+      port: "{{ env_var('PG_PORT', '5432') | int }}"
+      user: "{{ env_var('PG_USER', 'postgres') }}"
+      password: "{{ env_var('PG_PASSWORD', '') }}"
+      dbname: "{{ env_var('PG_DATABASE', 'fab') }}"
+      schema: public
+      threads: 4

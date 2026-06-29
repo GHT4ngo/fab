@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: gold_cards
+    description: "API-ready card printings and prices."
+    columns:
+      - name: printing_unique_id
+        tests:
+          - not_null
+          - unique
+      - name: display_id
+        tests:
+          - not_null
+      - name: set_id
+        tests:
+          - not_null
+      - name: name
+        tests:
+          - not_null
+      - name: edition
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['A', 'F', 'U', 'N']
+      - name: foiling
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'R', 'C', 'G']
+      - name: match_tier
+        tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+      - name: price_confidence
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['high', 'medium', 'low']

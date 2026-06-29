@@ -1,0 +1,10 @@
+# Heavy, optional deps — only needed for the /scan card-recognition endpoint
+# and the image-hash / ORB ingest scripts. Install with:
+#   pip install -r requirements-ocr.txt
+easyocr
+imagehash
+numpy
+opencv-python-headless
+# pytesseract drives the "code" scan engine (reads the bottom-left set code).
+# NOTE: also needs the system binary: sudo apt-get install -y tesseract-ocr
+pytesseract

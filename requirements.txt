@@ -1,0 +1,10 @@
+# Core app: API + pipeline (no heavy OCR deps — see requirements-ocr.txt)
+fastapi
+uvicorn[standard]
+psycopg2-binary
+python-dotenv
+rapidfuzz
+requests
+Pillow
+pydantic
+dbt-postgres
