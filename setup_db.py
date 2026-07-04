@@ -36,6 +36,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;
 CREATE SCHEMA IF NOT EXISTS gold;
+CREATE SCHEMA IF NOT EXISTS app;
 
 -- ── Bronze: card printings from The Fab Cube ─────────────────────────────────
 -- One row per printing (set × edition × foiling).
@@ -261,6 +262,28 @@ CREATE TABLE IF NOT EXISTS bronze.tcgcsv_prices (
 );
 
 CREATE INDEX IF NOT EXISTS tcgcsv_prices_product ON bronze.tcgcsv_prices (product_id);
+
+-- ── App: phone/native scanner captures ──────────────────────────────────────
+-- Append-only scan log. printing_unique_id points at gold.gold_cards when the
+-- scanner can resolve a concrete printing; name-only visual fallback is still
+-- stored for review with printing_unique_id NULL.
+CREATE TABLE IF NOT EXISTS app.scanned_cards (
+    scan_id             BIGSERIAL   PRIMARY KEY,
+    scanned_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    scanner             TEXT        NOT NULL DEFAULT 'native_android',
+    printing_unique_id  TEXT,
+    display_id          TEXT,
+    name                TEXT,
+    method              TEXT,
+    confidence          NUMERIC(5,3),
+    raw_text            TEXT,
+    debug_paths         TEXT[],
+    response            JSONB
+);
+
+CREATE INDEX IF NOT EXISTS scanned_cards_scanned_at ON app.scanned_cards (scanned_at DESC);
+CREATE INDEX IF NOT EXISTS scanned_cards_printing   ON app.scanned_cards (printing_unique_id);
+CREATE INDEX IF NOT EXISTS scanned_cards_display_id ON app.scanned_cards (display_id);
 """
 
 
