@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
@@ -100,6 +102,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ── UI styling helpers ──────────────────────────────────────────────────
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** A flat cyber button: rounded, cyan outline, translucent cyan fill, cyan caps text. */
+    private fun cyberButton(label: String): Button = Button(this).apply {
+        text = label
+        isAllCaps = true
+        setTextColor(Theme.CYAN)
+        textSize = 11f
+        letterSpacing = 0.08f
+        typeface = Typeface.DEFAULT_BOLD
+        minWidth = 0
+        minimumWidth = 0
+        stateListAnimator = null
+        background = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(Color.argb(30, 0, 240, 255))
+            setStroke(dp(1), Theme.CYAN_DIM)
+        }
+        setPadding(dp(6), dp(9), dp(6), dp(9))
+    }
+
+    private fun styleInput(e: EditText, mono: Boolean = false) {
+        e.setSingleLine(true)
+        e.setTextColor(Theme.TEXT)
+        e.setHintTextColor(Theme.MUTED)
+        e.textSize = 13f
+        if (mono) { e.typeface = Typeface.MONOSPACE; e.letterSpacing = 0.1f }
+        e.background = GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(Color.argb(90, 0, 0, 0))
+            setStroke(dp(1), Theme.CYAN_DIM)
+        }
+        e.setPadding(dp(12), dp(10), dp(12), dp(10))
+    }
+
     private fun buildUi() {
         val root = FrameLayout(this)
         previewView = PreviewView(this).apply {
@@ -110,46 +148,71 @@ class MainActivity : ComponentActivity() {
         val guide = CardGuideView(this)
         root.addView(guide, FrameLayout.LayoutParams(-1, -1))
 
+        // ── Top header: glowing FAB SCANNER wordmark ──────────────────────────
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            setBackgroundColor(Theme.HEADER)
+        }
+        header.addView(TextView(this).apply {
+            text = "FAB"
+            setTextColor(Theme.CYAN)
+            textSize = 18f
+            isAllCaps = true
+            letterSpacing = 0.24f
+            typeface = Typeface.DEFAULT_BOLD
+            setShadowLayer(16f, 0f, 0f, Theme.CYAN)
+        })
+        header.addView(TextView(this).apply {
+            text = "SCANNER"
+            setTextColor(Theme.MUTED)
+            textSize = 12f
+            isAllCaps = true
+            letterSpacing = 0.28f
+            setPadding(dp(8), dp(3), 0, 0)
+        })
+        root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+
+        // ── Bottom control panel ─────────────────────────────────────────────
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(20, 20, 20, 20)
-            setBackgroundColor(Color.argb(145, 0, 0, 0))
+            setPadding(dp(18), dp(16), dp(18), dp(18))
+            background = GradientDrawable().apply {
+                cornerRadii = floatArrayOf(dp(20).toFloat(), dp(20).toFloat(), dp(20).toFloat(), dp(20).toFloat(), 0f, 0f, 0f, 0f)
+                setColor(Theme.PANEL)
+                setStroke(dp(1), Theme.CYAN_DIM)
+            }
         }
         status = TextView(this).apply {
             text = "Starting camera"
-            setTextColor(Color.WHITE)
+            setTextColor(Theme.CYAN)
             textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.04f
         }
         debug = TextView(this).apply {
             text = lastCrashSummary() ?: "Enter the pair code from the web scanner."
-            setTextColor(Color.rgb(180, 255, 200))
+            setTextColor(Theme.MUTED)
             textSize = 12f
+            setPadding(0, dp(4), 0, dp(10))
         }
         apiInput = EditText(this).apply {
-            setSingleLine(true)
             hint = "API URL"
             setText(apiBase)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.rgb(180, 180, 180))
-            setBackgroundColor(Color.argb(70, 255, 255, 255))
-            setPadding(16, 6, 16, 6)
-        }
+        }.also { styleInput(it) }
         sessionInput = EditText(this).apply {
-            setSingleLine(true)
             hint = "Pair code"
             setText(sessionCode)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.rgb(180, 180, 180))
-            setBackgroundColor(Color.argb(70, 255, 255, 255))
-            setPadding(16, 6, 16, 6)
-        }
+        }.also { styleInput(it, mono = true) }
+
         apiRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             visibility = View.GONE
+            setPadding(0, 0, 0, dp(8))
         }
         apiRow.addView(apiInput, LinearLayout.LayoutParams(0, -2, 1f))
-        apiRow.addView(Button(this).apply {
-            text = "Use"
+        apiRow.addView(cyberButton("Use").apply {
             setOnClickListener {
                 apiBase = cleanApiBase(apiInput.text?.toString().orEmpty())
                 apiInput.setText(apiBase)
@@ -160,11 +223,11 @@ class MainActivity : ComponentActivity() {
                 status.text = "API URL saved"
                 debug.text = apiBase
             }
-        })
+        }, LinearLayout.LayoutParams(-2, -1).apply { leftMargin = dp(8) })
+
         val sessionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         sessionRow.addView(sessionInput, LinearLayout.LayoutParams(0, -2, 1f))
-        sessionRow.addView(Button(this).apply {
-            text = "Pair"
+        sessionRow.addView(cyberButton("Pair").apply {
             setOnClickListener {
                 sessionCode = cleanSessionCode(sessionInput.text?.toString().orEmpty())
                 sessionInput.setText(sessionCode)
@@ -175,34 +238,36 @@ class MainActivity : ComponentActivity() {
                 status.text = if (sessionCode.isBlank()) "Enter pair code" else "Ready to scan"
                 debug.text = if (sessionCode.isBlank()) "Open the web scanner and tap Pair phone." else "Pass cards through the guide."
             }
+        }, LinearLayout.LayoutParams(-2, -1).apply { leftMargin = dp(8) })
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(10), 0, 0)
+        }
+        fun rowButton(b: Button) = row.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply {
+            leftMargin = dp(3); rightMargin = dp(3)
         })
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(Button(this).apply {
-            text = if (cameraOn) "Cam On" else "Cam Off"
+        rowButton(cyberButton(if (cameraOn) "Cam On" else "Cam Off").apply {
             setOnClickListener {
                 toggleCamera()
                 text = if (cameraOn) "Cam On" else "Cam Off"
             }
         })
-        row.addView(Button(this).apply {
-            text = "Refocus"
-            setOnClickListener { focusAtCenter() }
-        })
-        row.addView(Button(this).apply {
-            text = "Torch"
+        rowButton(cyberButton("Refocus").apply { setOnClickListener { focusAtCenter() } })
+        rowButton(cyberButton("Torch").apply {
             setOnClickListener {
                 torchOn = !torchOn
                 camera?.cameraControl?.enableTorch(torchOn)
             }
         })
-        row.addView(Button(this).apply {
-            text = "Advanced"
+        rowButton(cyberButton("Advanced").apply {
             setOnClickListener {
                 showAdvanced = !showAdvanced
                 apiRow.visibility = if (showAdvanced) View.VISIBLE else View.GONE
                 debug.text = if (showAdvanced) apiBase else "Pass cards through the guide."
             }
         })
+
         panel.addView(status)
         panel.addView(debug)
         panel.addView(apiRow)
@@ -492,6 +557,19 @@ private fun cleanSessionCode(raw: String): String =
 
 private fun jsonEscape(raw: String): String =
     raw.replace("\\", "\\\\").replace("\"", "\\\"")
+
+// Cyber palette — mirrors the web app (deep blue-black, cyan primary, magenta accent).
+private object Theme {
+    val CYAN     = Color.rgb(0, 240, 255)
+    val CYAN_DIM = Color.argb(150, 0, 240, 255)
+    val MAGENTA  = Color.rgb(240, 70, 240)
+    val PANEL    = Color.argb(236, 11, 15, 23)
+    val HEADER   = Color.argb(140, 8, 11, 18)
+    val TEXT     = Color.rgb(214, 246, 250)
+    val MUTED    = Color.rgb(135, 158, 170)
+    val OK       = Color.rgb(45, 220, 140)
+    val WARN     = Color.rgb(240, 95, 95)
+}
 
 private const val DEFAULT_API_BASE = "https://ties-immigration-save-sitemap.trycloudflare.com"
 
