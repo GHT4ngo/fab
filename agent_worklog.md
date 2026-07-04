@@ -6,6 +6,37 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-04 — Phase 2 backend: email accounts (magic-link) + named cardlists
+
+Passwordless account system + server-side cardlists in the `app` schema. Email delivery
+is **DEV MODE** (link returned in the response + logged, not emailed) — swap
+`_deliver_magic_link()` for a real sender (Resend/SMTP) to go live.
+
+### Schema (setup_db.py canonical + api.py self-migrates via ensure_app_auth_schema)
+- `app.users` (email UNIQUE), `app.magic_tokens` (15-min TTL), `app.sessions` (30-day TTL,
+  bearer token), `app.cardlists`, `app.cardlist_items` (UNIQUE(list, printing), qty).
+
+### API (all before the `/` static mount)
+- `POST /auth/request-link` {email} → mints token, returns `dev_link` (+ logs it).
+- `GET /auth/verify?token=` → consumes token, upserts user, returns `session_token`.
+- `GET /auth/me`, `POST /auth/logout`. Auth via `Authorization: Bearer <session_token>`
+  resolved by the `_current_user` dependency (401 on missing/expired).
+- Cardlists CRUD: `GET/POST /cardlists`, `GET/PATCH/DELETE /cardlists/{id}`,
+  `POST /cardlists/{id}/items` (adds to qty on conflict), `PATCH`/`DELETE
+  /cardlists/{id}/items/{printing}`. Items join `gold.gold_cards` for name/image/price;
+  list index carries `item_count` + `total_sek`. Ownership enforced everywhere
+  (`_get_owned_cardlist` → 404 for other users).
+
+### Verified end-to-end (throwaway uvicorn on :8010, shared DB, then cleaned up)
+- Full flow: request-link → verify → me (+401 without token) → create → add item (qty
+  increments on re-add) → unknown printing 404 → detail (joined, total_sek=71) → set qty →
+  rename → delete (→404) → logout (→401). Ownership: user2 gets 404 on user1's list + own
+  list `[]`. One bug found + fixed: detail query referenced `g.set_name` which doesn't exist
+  on `gold.gold_cards` (set_name lives on the `fab_sets s` join other endpoints use).
+- NOT live on :8001 yet — needs an API restart. Frontend (login UI + "my lists") is next.
+
+---
+
 ## 2026-07-04 — Tunnel self-heal, app endpoint auto-discovery, Phase 1 verified live
 
 ### Phase 1 backend — VERIFIED LIVE (after API restart)

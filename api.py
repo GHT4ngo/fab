@@ -16,7 +16,7 @@ from rapidfuzz import process, fuzz
 import requests as http_requests
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -1864,6 +1864,452 @@ def scan_debug(req: ScanRequest):
         "edges_adaptive":   _to_b64(e3d),
         "processed":        _to_b64(proc_bgr),
     }
+
+
+# ── Phase 2: email accounts (magic-link) + named cardlists ──────────────────
+# Portable account = email. Passwordless: POST /auth/request-link mints a short-lived
+# magic token; GET /auth/verify?token=… consumes it and returns a long-lived session
+# token the client sends as `Authorization: Bearer <token>`. Cardlists belong to a user
+# and hold printings (printing_unique_id → gold.gold_cards) with quantities.
+#
+# EMAIL DELIVERY IS DEV-MODE: the magic link is returned in the response + logged, not
+# emailed. Swap _deliver_magic_link() for a real sender (Resend/SMTP) to go live.
+APP_AUTH_SCHEMA_SQL = """
+CREATE SCHEMA IF NOT EXISTS app;
+
+CREATE TABLE IF NOT EXISTS app.users (
+    user_id        BIGSERIAL   PRIMARY KEY,
+    email          TEXT        NOT NULL UNIQUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS app.magic_tokens (
+    token       TEXT        PRIMARY KEY,
+    email       TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS magic_tokens_email ON app.magic_tokens (email);
+
+CREATE TABLE IF NOT EXISTS app.sessions (
+    session_token TEXT        PRIMARY KEY,
+    user_id       BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at    TIMESTAMPTZ NOT NULL,
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON app.sessions (user_id);
+
+CREATE TABLE IF NOT EXISTS app.cardlists (
+    cardlist_id BIGSERIAL   PRIMARY KEY,
+    user_id     BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    name        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS cardlists_user ON app.cardlists (user_id);
+
+CREATE TABLE IF NOT EXISTS app.cardlist_items (
+    item_id            BIGSERIAL   PRIMARY KEY,
+    cardlist_id        BIGINT      NOT NULL REFERENCES app.cardlists(cardlist_id) ON DELETE CASCADE,
+    printing_unique_id TEXT        NOT NULL,
+    qty                INTEGER     NOT NULL DEFAULT 1,
+    added_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (cardlist_id, printing_unique_id)
+);
+CREATE INDEX IF NOT EXISTS cardlist_items_list ON app.cardlist_items (cardlist_id);
+"""
+
+MAGIC_TOKEN_TTL = "15 minutes"   # how long a magic link is valid
+SESSION_TTL     = "30 days"      # how long a login session lasts
+
+
+def ensure_app_auth_schema():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(APP_AUTH_SCHEMA_SQL)
+
+
+def _normalise_email(raw: str | None) -> str | None:
+    email = (raw or "").strip().lower()
+    # Deliberately light validation — dev mode. A real sender will bounce bad addresses.
+    if "@" not in email or "." not in email.split("@")[-1] or len(email) > 240:
+        return None
+    return email
+
+
+def _public_base_url() -> str:
+    """Best-effort public origin for building the magic link (the live tunnel URL)."""
+    try:
+        u = (HERE / "tmp" / "logs" / "tunnel_url.txt").read_text().strip()
+        if u:
+            return u.rstrip("/")
+    except Exception:
+        pass
+    return os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+
+
+def _deliver_magic_link(email: str, link: str) -> None:
+    """DEV MODE: log the link instead of emailing it. Swap this for a real transactional
+    sender (Resend/Postmark/SMTP) — signature stays the same — to send real emails."""
+    _slog(f"[AUTH] magic link for {email}: {link}")
+
+
+def _current_user(authorization: Optional[str] = Header(None)) -> dict:
+    """Resolve `Authorization: Bearer <session_token>` to a user, or 401. Touches
+    last_seen_at so active sessions stay warm. Expired sessions are rejected."""
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE app.sessions
+                   SET last_seen_at = NOW()
+                 WHERE session_token = %s AND expires_at > NOW()
+             RETURNING user_id
+                """,
+                [token],
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=401, detail="Session expired or invalid")
+            cur.execute(
+                "SELECT user_id, email, created_at, last_login_at FROM app.users WHERE user_id = %s",
+                [row["user_id"]],
+            )
+            user = cur.fetchone()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return dict(user)
+
+
+def _get_owned_cardlist(cur, user_id: int, cardlist_id: int) -> dict:
+    """Fetch a cardlist owned by user_id, or raise 404. Enforces ownership everywhere."""
+    cur.execute(
+        "SELECT cardlist_id, user_id, name, created_at, updated_at "
+        "FROM app.cardlists WHERE cardlist_id = %s AND user_id = %s",
+        [cardlist_id, user_id],
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Cardlist not found")
+    return dict(row)
+
+
+class AuthRequest(BaseModel):
+    email: str
+
+
+class CardlistCreate(BaseModel):
+    name: str
+
+
+class CardlistRename(BaseModel):
+    name: str
+
+
+class CardlistItemAdd(BaseModel):
+    printing_unique_id: str
+    qty: int = 1
+
+
+class CardlistItemQty(BaseModel):
+    qty: int
+
+
+@app.post("/auth/request-link")
+def auth_request_link(req: AuthRequest):
+    """Start passwordless login: mint a magic token for this email and 'send' the link.
+    Dev mode returns the link directly; production would only email it."""
+    ensure_app_auth_schema()
+    email = _normalise_email(req.email)
+    if not email:
+        return JSONResponse(status_code=400, content={"error": "Enter a valid email address"})
+
+    token = secrets.token_urlsafe(32)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app.magic_tokens (token, email, expires_at) "
+                "VALUES (%s, %s, NOW() + INTERVAL %s)",
+                [token, email, MAGIC_TOKEN_TTL],
+            )
+
+    base = _public_base_url()
+    link = f"{base}/auth/verify?token={token}" if base else f"/auth/verify?token={token}"
+    _deliver_magic_link(email, link)
+    return {
+        "sent": True,
+        "email": email,
+        "expires_in": MAGIC_TOKEN_TTL,
+        # DEV ONLY — remove once real email delivery is wired up.
+        "dev_link": link,
+    }
+
+
+@app.get("/auth/verify")
+def auth_verify(token: str = Query(...)):
+    """Consume a magic token: mark it used, upsert the user, mint a session token."""
+    ensure_app_auth_schema()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE app.magic_tokens SET used_at = NOW() "
+                "WHERE token = %s AND used_at IS NULL AND expires_at > NOW() "
+                "RETURNING email",
+                [token],
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=400, detail="Link is invalid, used, or expired")
+            email = row["email"]
+
+            cur.execute(
+                "INSERT INTO app.users (email, last_login_at) VALUES (%s, NOW()) "
+                "ON CONFLICT (email) DO UPDATE SET last_login_at = NOW() "
+                "RETURNING user_id, email",
+                [email],
+            )
+            user = cur.fetchone()
+
+            session_token = secrets.token_urlsafe(32)
+            cur.execute(
+                "INSERT INTO app.sessions (session_token, user_id, expires_at) "
+                "VALUES (%s, %s, NOW() + INTERVAL %s)",
+                [session_token, user["user_id"], SESSION_TTL],
+            )
+    return {
+        "session_token": session_token,
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "expires_in": SESSION_TTL,
+    }
+
+
+@app.get("/auth/me")
+def auth_me(user: dict = Depends(_current_user)):
+    """Who am I — validates the session token and returns the account."""
+    return {
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
+        "last_login_at": user["last_login_at"].isoformat() if user.get("last_login_at") else None,
+    }
+
+
+@app.post("/auth/logout")
+def auth_logout(authorization: Optional[str] = Header(None)):
+    """Invalidate the current session token (idempotent)."""
+    token = authorization[7:].strip() if authorization and authorization.lower().startswith("bearer ") else ""
+    if token:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM app.sessions WHERE session_token = %s", [token])
+    return {"ok": True}
+
+
+@app.get("/cardlists")
+def cardlists_list(user: dict = Depends(_current_user)):
+    """All of the current user's cardlists with item count + total SEK value."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    l.cardlist_id, l.name, l.created_at, l.updated_at,
+                    COALESCE(SUM(i.qty), 0)                        AS item_count,
+                    COALESCE(SUM(i.qty * COALESCE(g.price_sek, 0)), 0) AS total_sek
+                FROM app.cardlists l
+                LEFT JOIN app.cardlist_items i ON i.cardlist_id = l.cardlist_id
+                LEFT JOIN gold.gold_cards g    ON g.printing_unique_id = i.printing_unique_id
+                WHERE l.user_id = %s
+                GROUP BY l.cardlist_id
+                ORDER BY l.updated_at DESC
+                """,
+                [user["user_id"]],
+            )
+            rows = cur.fetchall()
+    return [{
+        "cardlist_id": r["cardlist_id"],
+        "name": r["name"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        "item_count": int(r["item_count"]),
+        "total_sek": int(r["total_sek"]),
+    } for r in rows]
+
+
+@app.post("/cardlists")
+def cardlists_create(req: CardlistCreate, user: dict = Depends(_current_user)):
+    """Create a new named cardlist."""
+    name = (req.name or "").strip()[:120]
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "Name is required"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app.cardlists (user_id, name) VALUES (%s, %s) "
+                "RETURNING cardlist_id, name, created_at, updated_at",
+                [user["user_id"], name],
+            )
+            r = cur.fetchone()
+    return {
+        "cardlist_id": r["cardlist_id"],
+        "name": r["name"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        "item_count": 0,
+        "total_sek": 0,
+    }
+
+
+@app.get("/cardlists/{cardlist_id}")
+def cardlists_get(cardlist_id: int, user: dict = Depends(_current_user)):
+    """A cardlist with its items joined to gold.gold_cards for display."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            lst = _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            cur.execute(
+                """
+                SELECT
+                    i.printing_unique_id, i.qty, i.added_at,
+                    g.name, g.set_id, g.edition, g.foiling,
+                    g.rarity, g.image_url, g.price_sek
+                FROM app.cardlist_items i
+                LEFT JOIN gold.gold_cards g ON g.printing_unique_id = i.printing_unique_id
+                WHERE i.cardlist_id = %s
+                ORDER BY i.added_at DESC
+                """,
+                [cardlist_id],
+            )
+            items = cur.fetchall()
+
+    out_items = []
+    total = 0
+    for it in items:
+        price = int(it["price_sek"]) if it["price_sek"] is not None else None
+        total += (price or 0) * it["qty"]
+        out_items.append({
+            "printing_unique_id": it["printing_unique_id"],
+            "qty": it["qty"],
+            "added_at": it["added_at"].isoformat() if it["added_at"] else None,
+            "name": it["name"],
+            "set_id": it["set_id"],
+            "edition": it["edition"],
+            "foiling": it["foiling"],
+            "rarity": it["rarity"],
+            "image_url": it["image_url"],
+            "price_sek": price,
+        })
+    return {
+        "cardlist_id": lst["cardlist_id"],
+        "name": lst["name"],
+        "created_at": lst["created_at"].isoformat() if lst["created_at"] else None,
+        "updated_at": lst["updated_at"].isoformat() if lst["updated_at"] else None,
+        "item_count": sum(i["qty"] for i in out_items),
+        "total_sek": total,
+        "items": out_items,
+    }
+
+
+@app.patch("/cardlists/{cardlist_id}")
+def cardlists_rename(cardlist_id: int, req: CardlistRename, user: dict = Depends(_current_user)):
+    """Rename a cardlist."""
+    name = (req.name or "").strip()[:120]
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "Name is required"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            cur.execute(
+                "UPDATE app.cardlists SET name = %s, updated_at = NOW() WHERE cardlist_id = %s",
+                [name, cardlist_id],
+            )
+    return {"cardlist_id": cardlist_id, "name": name}
+
+
+@app.delete("/cardlists/{cardlist_id}")
+def cardlists_delete(cardlist_id: int, user: dict = Depends(_current_user)):
+    """Delete a cardlist and its items (cascade)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            cur.execute("DELETE FROM app.cardlists WHERE cardlist_id = %s", [cardlist_id])
+    return {"ok": True, "cardlist_id": cardlist_id}
+
+
+@app.post("/cardlists/{cardlist_id}/items")
+def cardlists_add_item(cardlist_id: int, req: CardlistItemAdd, user: dict = Depends(_current_user)):
+    """Add a printing to a cardlist (adds to qty if it's already there)."""
+    printing_id = (req.printing_unique_id or "").strip()
+    qty = max(1, min(9999, req.qty))
+    if not printing_id:
+        return JSONResponse(status_code=400, content={"error": "printing_unique_id is required"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            cur.execute("SELECT 1 FROM gold.gold_cards WHERE printing_unique_id = %s", [printing_id])
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Unknown printing_unique_id")
+            cur.execute(
+                """
+                INSERT INTO app.cardlist_items (cardlist_id, printing_unique_id, qty)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (cardlist_id, printing_unique_id)
+                DO UPDATE SET qty = app.cardlist_items.qty + EXCLUDED.qty
+                RETURNING printing_unique_id, qty
+                """,
+                [cardlist_id, printing_id, qty],
+            )
+            r = cur.fetchone()
+            cur.execute("UPDATE app.cardlists SET updated_at = NOW() WHERE cardlist_id = %s", [cardlist_id])
+    return {"printing_unique_id": r["printing_unique_id"], "qty": r["qty"]}
+
+
+@app.patch("/cardlists/{cardlist_id}/items/{printing_unique_id}")
+def cardlists_set_item_qty(cardlist_id: int, printing_unique_id: str, req: CardlistItemQty,
+                           user: dict = Depends(_current_user)):
+    """Set an item's quantity. qty <= 0 removes it."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            if req.qty <= 0:
+                cur.execute(
+                    "DELETE FROM app.cardlist_items WHERE cardlist_id = %s AND printing_unique_id = %s",
+                    [cardlist_id, printing_unique_id],
+                )
+                removed = True
+            else:
+                cur.execute(
+                    "UPDATE app.cardlist_items SET qty = %s "
+                    "WHERE cardlist_id = %s AND printing_unique_id = %s RETURNING qty",
+                    [min(9999, req.qty), cardlist_id, printing_unique_id],
+                )
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Item not in cardlist")
+                removed = False
+            cur.execute("UPDATE app.cardlists SET updated_at = NOW() WHERE cardlist_id = %s", [cardlist_id])
+    return {"printing_unique_id": printing_unique_id, "qty": 0 if removed else min(9999, req.qty), "removed": removed}
+
+
+@app.delete("/cardlists/{cardlist_id}/items/{printing_unique_id}")
+def cardlists_remove_item(cardlist_id: int, printing_unique_id: str, user: dict = Depends(_current_user)):
+    """Remove a printing from a cardlist."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            cur.execute(
+                "DELETE FROM app.cardlist_items WHERE cardlist_id = %s AND printing_unique_id = %s",
+                [cardlist_id, printing_unique_id],
+            )
+            cur.execute("UPDATE app.cardlists SET updated_at = NOW() WHERE cardlist_id = %s", [cardlist_id])
+    return {"ok": True, "printing_unique_id": printing_unique_id}
 
 
 # ── Serve the built frontend ────────────────────────────────────────────────

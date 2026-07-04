@@ -284,6 +284,55 @@ CREATE TABLE IF NOT EXISTS app.scanned_cards (
 CREATE INDEX IF NOT EXISTS scanned_cards_scanned_at ON app.scanned_cards (scanned_at DESC);
 CREATE INDEX IF NOT EXISTS scanned_cards_printing   ON app.scanned_cards (printing_unique_id);
 CREATE INDEX IF NOT EXISTS scanned_cards_display_id ON app.scanned_cards (display_id);
+
+-- ── App: email accounts + named cardlists (Phase 2) ──────────────────────────
+-- Portable account = email. Magic-link auth (passwordless): request a link, verify
+-- it to mint a session token. Named cardlists belong to a user and hold printings
+-- (printing_unique_id → gold.gold_cards) with quantities. api.py self-migrates the
+-- same DDL at startup (ensure_app_auth_schema), so this stays the canonical copy.
+CREATE TABLE IF NOT EXISTS app.users (
+    user_id        BIGSERIAL   PRIMARY KEY,
+    email          TEXT        NOT NULL UNIQUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS app.magic_tokens (
+    token       TEXT        PRIMARY KEY,
+    email       TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS magic_tokens_email ON app.magic_tokens (email);
+
+CREATE TABLE IF NOT EXISTS app.sessions (
+    session_token TEXT        PRIMARY KEY,
+    user_id       BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at    TIMESTAMPTZ NOT NULL,
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON app.sessions (user_id);
+
+CREATE TABLE IF NOT EXISTS app.cardlists (
+    cardlist_id BIGSERIAL   PRIMARY KEY,
+    user_id     BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    name        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS cardlists_user ON app.cardlists (user_id);
+
+CREATE TABLE IF NOT EXISTS app.cardlist_items (
+    item_id            BIGSERIAL   PRIMARY KEY,
+    cardlist_id        BIGINT      NOT NULL REFERENCES app.cardlists(cardlist_id) ON DELETE CASCADE,
+    printing_unique_id TEXT        NOT NULL,
+    qty                INTEGER     NOT NULL DEFAULT 1,
+    added_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (cardlist_id, printing_unique_id)
+);
+CREATE INDEX IF NOT EXISTS cardlist_items_list ON app.cardlist_items (cardlist_id);
 """
 
 
@@ -346,6 +395,9 @@ def main():
     ok("bronze.tcgcsv_groups")
     ok("bronze.tcgcsv_cards")
     ok("bronze.tcgcsv_prices")
+    ok("app.scanned_cards / scan_sessions")
+    ok("app.users / magic_tokens / sessions")
+    ok("app.cardlists / cardlist_items")
     ok("extension: pg_trgm")
     cur.close()
     conn.close()
