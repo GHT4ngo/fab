@@ -7,11 +7,9 @@ Starts:
   2. A Cloudflare quick tunnel (no account/domain needed) and prints the public
      https://<random>.trycloudflare.com URL.
 
-Then it syncs the **Lovable** frontend: the app hosted by Lovable (GitHub repo
-retro-data-display) runs on its own origin, so it needs the absolute API URL. We write
-the live tunnel URL into retro-data-display/.env (VITE_API_BASE_URL) and push so Lovable
-redeploys against the current API. The URL is also saved to tmp/logs/tunnel_url.txt.
-Set PUSH_LOVABLE=0 to update .env locally without pushing.
+It records the live tunnel URL in tmp/logs/tunnel_url.txt. Lovable/GitHub sync is
+explicitly opt-in: pass --sync-lovable or set PUSH_LOVABLE=1 to rewrite
+retro-data-display/.env, commit it, and push so Lovable redeploys.
 
 The tunnel is PERSISTENT: cloudflared runs detached and outlives this script, so a
 plain restart reuses the same URL (no Lovable push/rebuild). The URL only changes when
@@ -25,7 +23,8 @@ Get the Linux binary once with:
 
 Usage:
   python start_fab.py                # start/restart the API, reuse the live tunnel
-  python start_fab.py --new-tunnel   # force a fresh tunnel URL (re-syncs Lovable once)
+  python start_fab.py --sync-lovable # also push retro-data-display/.env for Lovable
+  python start_fab.py --new-tunnel   # force a fresh tunnel URL
   python start_fab.py --stop-tunnel  # kill the persistent tunnel
 """
 
@@ -34,8 +33,12 @@ import re
 import sys
 import time
 import shutil
+import signal
+import tempfile
 import threading
 import subprocess
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -45,12 +48,23 @@ API_PORT = int(os.getenv("API_PORT", "8001"))
 # reads VITE_API_BASE_URL from its .env at build time. Because it runs on a
 # different origin it needs the absolute tunnel URL. On each new URL we rewrite that
 # one line and push so Lovable redeploys against the live API. Only .env is staged —
-# the working tree may carry unrelated drift we must not commit. Set PUSH_LOVABLE=0
-# to update .env locally without pushing.
+# the working tree may carry unrelated drift we must not commit. This is opt-in
+# because startup must not depend on GitHub auth or Lovable deploy state.
 FRONTEND_DIR = HERE / "retro-data-display"
 FRONTEND_ENV = FRONTEND_DIR / ".env"
+FRONTEND_DIST = FRONTEND_DIR / "dist"
 URL_FILE     = HERE / "tmp" / "logs" / "tunnel_url.txt"
-PUSH_LOVABLE = os.getenv("PUSH_LOVABLE", "1") != "0"
+PUSH_LOVABLE = os.getenv("PUSH_LOVABLE", "0") == "1"
+GIT_TIMEOUT = int(os.getenv("GIT_TIMEOUT", "30"))
+GIT_PUSH_TIMEOUT = int(os.getenv("GIT_PUSH_TIMEOUT", "60"))
+
+# Native scanner endpoint discovery: the Android app has no way to know the current
+# ephemeral trycloudflare URL, so on every start we publish the live URL to a public
+# GitHub gist and the app fetches it at launch. Unlike the Lovable push, a gist edit
+# triggers no rebuild, so this runs on EVERY start (not gated by PUSH_LOVABLE) and the
+# app never needs to be re-pointed. Raw (always-latest) URL the app polls:
+#   https://gist.githubusercontent.com/GHT4ngo/<id>/raw/endpoint.txt
+ENDPOINT_GIST_ID = os.getenv("ENDPOINT_GIST_ID", "84b51c1df1551685fb9b151f684d979d")
 
 # The Cloudflare quick-tunnel runs as its own DETACHED, long-lived process so it
 # survives API restarts — its URL then stays stable and we don't re-push to Lovable
@@ -80,19 +94,64 @@ def _pid_alive(pid):
         return False
 
 
+def _find_cloudflared_tunnel_pid():
+    needle = f"cloudflared tunnel --url http://localhost:{API_PORT}"
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-af", "cloudflared"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    for line in proc.stdout.splitlines():
+        if needle in line and "--no-autoupdate" in line:
+            try:
+                return int(line.split(None, 1)[0])
+            except (ValueError, IndexError):
+                continue
+    return None
+
+
+def tunnel_reachable(url, timeout=8):
+    """True if the public tunnel URL actually serves traffic — not just that the
+    cloudflared PID is alive. Quick tunnels routinely keep their process running while
+    the edge 'control stream' has died, so a live PID does NOT mean a working tunnel.
+    Any HTTP response (even a 4xx/5xx) proves the edge is up; only a connection-level
+    failure (refused/timeout/DNS) means the tunnel is dead."""
+    if not url:
+        return False
+    try:
+        with urllib.request.urlopen(url + "/stats", timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True   # edge answered with a status code → tunnel itself is alive
+    except Exception:
+        return False
+
+
 def tunnel_status():
     """Return (pid, url) for a still-running persistent tunnel, else (None, None)."""
-    try:
-        pid = int(CF_PIDFILE.read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return None, None
-    if not _pid_alive(pid):
-        return None, None
     try:
         url = URL_FILE.read_text().strip() or None
     except FileNotFoundError:
         url = None
-    return pid, url
+
+    try:
+        pid = int(CF_PIDFILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        pid = None
+    if pid and _pid_alive(pid):
+        return pid, url
+
+    recovered_pid = _find_cloudflared_tunnel_pid()
+    if recovered_pid and url:
+        CF_PIDFILE.write_text(str(recovered_pid))
+        return recovered_pid, url
+    if pid:
+        CF_PIDFILE.unlink(missing_ok=True)
+    return None, None
 
 
 def start_persistent_tunnel(cloudflared):
@@ -105,7 +164,6 @@ def start_persistent_tunnel(cloudflared):
         stdout=logf, stderr=subprocess.STDOUT, cwd=HERE,
         start_new_session=True,          # detach: own session, immune to our Ctrl+C / exit
     )
-    CF_PIDFILE.write_text(str(proc.pid))
 
     url, deadline = None, time.time() + 25
     while time.time() < deadline:
@@ -121,7 +179,13 @@ def start_persistent_tunnel(cloudflared):
         time.sleep(0.3)
 
     if url:
+        CF_PIDFILE.write_text(str(proc.pid))
         URL_FILE.write_text(url + "\n")
+    else:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
     return url
 
 
@@ -147,6 +211,74 @@ def stream_output(proc, prefix, suppress_re=None):
         print(f"  {prefix} {text}")
 
 
+def _port_pids(port):
+    """Return PIDs listening on a TCP port, using ss when available."""
+    try:
+        proc = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    pids = set()
+    for line in proc.stdout.splitlines():
+        if f":{port} " not in line:
+            continue
+        for pid in re.findall(r"pid=(\d+)", line):
+            pids.add(int(pid))
+    return sorted(pids)
+
+
+def _cmdline(pid):
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
+def stop_stale_api_on_port():
+    """Stop only the uvicorn api:app process that owns API_PORT; leave cloudflared alone."""
+    pids = _port_pids(API_PORT)
+    if not pids:
+        return
+
+    unknown = []
+    targets = []
+    for pid in pids:
+        cmd = _cmdline(pid)
+        if "uvicorn" in cmd and "api:app" in cmd:
+            targets.append(pid)
+        else:
+            unknown.append((pid, cmd or "<unknown>"))
+
+    if unknown:
+        print(f"  {RED}x{RESET}  Port {API_PORT} is busy, but not by this FAB API:")
+        for pid, cmd in unknown:
+            print(f"       PID {pid}: {cmd}")
+        print(f"  {YELLOW}->{RESET}  Stop that process or set API_PORT before restarting.")
+        sys.exit(1)
+
+    for pid in targets:
+        print(f"  {CYAN}->{RESET}  Stopping stale FAB API on port {API_PORT} (PID {pid})...")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        if not any(_pid_alive(pid) for pid in targets):
+            print(f"  {GREEN}ok{RESET}  Cleared stale API process")
+            return
+        time.sleep(0.25)
+
+    for pid in targets:
+        if _pid_alive(pid):
+            print(f"  {YELLOW}!!{RESET}  Stale API PID {pid} did not stop; killing it.")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
 def _read_env_url():
     try:
         for line in FRONTEND_ENV.read_text().splitlines():
@@ -170,26 +302,79 @@ def _write_env_url(url):
     FRONTEND_ENV.write_text("\n".join(out) + "\n")
 
 
-def _git(*args):
+def _git(*args, timeout=None):
     # GIT_TERMINAL_PROMPT=0 makes auth failures fail FAST instead of blocking on an
     # interactive username/password prompt (GitHub rejects passwords anyway — pushing
     # over HTTPS needs `gh auth setup-git` so git uses the gh token as a credential helper).
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    return subprocess.run(["git", *args], cwd=FRONTEND_DIR,
-                          capture_output=True, text=True, env=env)
+    timeout = GIT_TIMEOUT if timeout is None else timeout
+    try:
+        return subprocess.run(["git", *args], cwd=FRONTEND_DIR,
+                              capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            ["git", *args], 124, "", f"timed out after {timeout}s"
+        )
+
+
+def publish_endpoint(tunnel_url):
+    """Publish the live tunnel URL to a public gist so the native scanner app can
+    auto-discover the backend (no rebuild, no re-typing the URL). Best-effort — a
+    failure here never blocks startup; the app just keeps its last known URL."""
+    if not ENDPOINT_GIST_ID:
+        return
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write(tunnel_url + "\n")
+            tmp_path = f.name
+        res = subprocess.run(
+            ["gh", "gist", "edit", ENDPOINT_GIST_ID, "-f", "endpoint.txt", tmp_path],
+            capture_output=True, text=True, timeout=GIT_PUSH_TIMEOUT,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        if res.returncode == 0:
+            print(f"  {GREEN}ok{RESET}  App endpoint published → gist (app auto-discovers this URL)")
+        else:
+            err = (res.stderr or res.stdout or "").strip()
+            print(f"  {YELLOW}!!{RESET}  Could not update app endpoint gist — app may keep its old URL.")
+            if err:
+                print(f"       gh said: {err[:200]}")
+    except FileNotFoundError:
+        print(f"  {YELLOW}!!{RESET}  gh CLI not found — skipped app endpoint publish.")
+    except subprocess.TimeoutExpired:
+        print(f"  {YELLOW}!!{RESET}  Timed out publishing app endpoint gist.")
+    except Exception:
+        pass
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def sync_lovable(tunnel_url):
-    """Point the Lovable frontend at the live API URL and push so it redeploys.
-    Records the URL to tmp/logs/tunnel_url.txt and stages ONLY .env (the working
-    tree may carry unrelated changes we must not commit)."""
+    """Record the live API URL; optionally push it for Lovable when explicitly enabled."""
     try:
         URL_FILE.parent.mkdir(parents=True, exist_ok=True)
         URL_FILE.write_text(tunnel_url + "\n")
     except Exception:
         pass
 
+    # Push to Lovable when explicitly requested OR whenever the URL actually changed —
+    # a changed URL means the Lovable frontend is now pointed at a dead tunnel, which is
+    # the exact "restarted but frontend can't connect" failure. This still causes no
+    # rebuild churn on a normal same-URL restart (url_changed is False → we return).
+    url_changed = FRONTEND_ENV.exists() and _read_env_url() != tunnel_url
+    if not PUSH_LOVABLE and not url_changed:
+        print(f"  {GREEN}ok{RESET}  Lovable .env already matches this URL — no sync needed")
+        return
+    if not PUSH_LOVABLE and url_changed:
+        print(f"  {CYAN}->{RESET}  Tunnel URL changed — syncing Lovable so the frontend isn't left stale.")
+
     if not FRONTEND_ENV.exists():
+        print(f"  {YELLOW}!!{RESET}  Lovable sync requested, but retro-data-display/.env is missing.")
         return
     if _read_env_url() == tunnel_url:
         print(f"  {GREEN}ok{RESET}  Lovable .env already points at this URL")
@@ -198,21 +383,29 @@ def sync_lovable(tunnel_url):
     _write_env_url(tunnel_url)
     print(f"  {GREEN}ok{RESET}  Updated retro-data-display/.env → {tunnel_url}")
 
-    if not PUSH_LOVABLE:
-        print(f"  {YELLOW}!!{RESET}  PUSH_LOVABLE=0 — not pushing; commit .env yourself to deploy.")
-        return
-
     if _git("add", ".env").returncode != 0:
         print(f"  {YELLOW}!!{RESET}  git add .env failed — push .env manually to deploy.")
         return
-    _git("commit", "-m", f"chore: point API at {tunnel_url}")
-    push = _git("push", "origin", "main")
+    if _git("diff", "--cached", "--quiet", "--", ".env").returncode == 0:
+        print(f"  {GREEN}ok{RESET}  Lovable .env is staged but unchanged")
+        return
+
+    commit = _git("commit", "-m", f"chore: point API at {tunnel_url}")
+    if commit.returncode != 0:
+        err = (commit.stderr or commit.stdout or "").strip()
+        print(f"  {YELLOW}!!{RESET}  Could not commit Lovable .env; API is still running.")
+        if err:
+            print(f"       git said: {err[:240]}")
+        print(f"  {YELLOW}->{RESET}  Manual deploy: cd retro-data-display && git add .env && git commit -m 'chore: point API at {tunnel_url}' && git push origin main")
+        return
+
+    push = _git("push", "origin", "main", timeout=GIT_PUSH_TIMEOUT)
 
     # Verify the commit actually reached the remote — a push can "succeed" partially or
     # the tunnel restart can interrupt the run, leaving Lovable on a dead URL. Compare the
     # local commit to what the remote reports for main.
     local = _git("rev-parse", "HEAD").stdout.strip()
-    remote = _git("ls-remote", "origin", "-h", "refs/heads/main").stdout.split()
+    remote = _git("ls-remote", "origin", "-h", "refs/heads/main", timeout=GIT_TIMEOUT).stdout.split()
     pushed = push.returncode == 0 and remote and remote[0] == local
 
     if pushed:
@@ -221,17 +414,21 @@ def sync_lovable(tunnel_url):
 
     # Loud, actionable failure — this is the difference between a working and a dead frontend.
     err = (push.stderr or "").strip()
-    print(f"  {RED}!!{RESET}  PUSH FAILED — the Lovable frontend is still pointing at a DEAD tunnel URL.")
+    print(f"  {RED}!!{RESET}  PUSH FAILED — the API is online, but Lovable may still point at the old tunnel URL.")
     if err:
-        print(f"       git said: {err[:200]}")
+        print(f"       git said: {err[:240]}")
     if "Authentication" in err or "could not read" in err or "terminal prompts disabled" in err:
         print(f"  {YELLOW}->{RESET}  Auth not set up. GitHub rejects passwords; run this ONCE:")
         print(f"           gh auth setup-git")
-    print(f"  {YELLOW}->{RESET}  Then push manually: cd retro-data-display && git push origin main")
+    print(f"  {YELLOW}->{RESET}  Manual deploy: update Lovable to {tunnel_url}, or run:")
+    print(f"           cd retro-data-display && git push origin main")
 
 
 def main():
     args = set(sys.argv[1:])
+    global PUSH_LOVABLE
+    if "--sync-lovable" in args:
+        PUSH_LOVABLE = True
 
     # `--stop-tunnel` tears down the persistent tunnel and exits (next start gets a new URL).
     if "--stop-tunnel" in args:
@@ -242,6 +439,7 @@ def main():
     print(f"{CYAN}{SEP}{RESET}\n")
 
     # -- 1. Start the API (uvicorn) --
+    stop_stale_api_on_port()
     print(f"  {CYAN}->{RESET}  Starting FAB API on port {API_PORT}...")
     api_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "api:app",
@@ -266,10 +464,16 @@ def main():
 
     tunnel_url = None
     pid, existing = tunnel_status()
-    if existing:
+    if existing and tunnel_reachable(existing):
         tunnel_url = existing
         print(f"  {GREEN}ok{RESET}  Reusing live tunnel (PID {pid}) — URL unchanged, no Lovable rebuild")
     else:
+        if existing:
+            # PID alive but the URL doesn't serve — a stale/zombie quick tunnel. Reusing
+            # it is exactly what leaves the frontend "connected to nothing" after a
+            # restart. Tear it down so we spawn a fresh, working one (new URL → synced).
+            print(f"  {YELLOW}!!{RESET}  Tunnel process is alive but not serving (dead edge) — replacing it.")
+            stop_tunnel()
         cloudflared = find_cloudflared()
         if not cloudflared:
             print(f"  {RED}x{RESET}  cloudflared not found. See the header of this file "
@@ -285,9 +489,19 @@ def main():
 
     print()
     print(f"  {GREEN}ok{RESET}  Public URL: {BOLD}{tunnel_url}{RESET}")
+    if FRONTEND_DIST.is_dir():
+        print(f"  {GREEN}ok{RESET}  Web app:     {BOLD}{tunnel_url}/{RESET}")
+        print(f"  {GREEN}ok{RESET}  Scanner:     {BOLD}{tunnel_url}/scan{RESET}")
+        print(f"  {GREEN}ok{RESET}  Admin:       {BOLD}{tunnel_url}/admin{RESET}")
     print(f"  {CYAN}->{RESET}  Tunnel persists across restarts (stop it with: "
           f"python start_fab.py --stop-tunnel)")
+    if not PUSH_LOVABLE:
+        print(f"  {CYAN}->{RESET}  Local app mode: Lovable/GitHub sync is disabled.")
     print()
+
+    # Publish the live URL for the native scanner app to auto-discover (every start —
+    # a gist edit triggers no rebuild, so the phone never needs re-pointing).
+    publish_endpoint(tunnel_url)
 
     # Point the Lovable-hosted frontend at this URL and push. No-ops when the URL is
     # unchanged (the common restart case) — so no redeploy churn.

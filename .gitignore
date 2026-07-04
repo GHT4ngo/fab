@@ -18,5 +18,11 @@ fab_dbt/target/
 fab_dbt/logs/
 fab_dbt/dbt_packages/
 
+# Android scanner build/editor artifacts
+fab-scanner-android/.gradle/
+fab-scanner-android/.idea/
+fab-scanner-android/**/build/
+fab-scanner-android/local.properties
+
 # Stray logs
 *.log

@@ -6,6 +6,260 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-04 — Tunnel self-heal, app endpoint auto-discovery, Phase 1 verified live
+
+### Phase 1 backend — VERIFIED LIVE (after API restart)
+- `/scan/code?code=HVY050` resolves to "Miller's Grindstone" + printings; OCR typo
+  `HVYO5O` auto-corrects to HVY050. `/cards` returns the fluff + SEK fields
+  (`health`, `intelligence`, `functional_text`, `price_eur_sek`, `price_usd_sek`). Done.
+
+### App backend auto-discovery (no more re-pointing the phone after a restart)
+- The native app had the trycloudflare URL hardcoded as `DEFAULT_API_BASE`, so every URL
+  rotation broke it. Now `start_fab.py:publish_endpoint()` writes the live URL to a public
+  gist on every start, and `MainActivity.discoverApiBase()` fetches it at launch and adopts
+  it. Gist: `GHT4ngo/84b51c1df1551685fb9b151f684d979d` → raw `endpoint.txt`. A gist edit
+  triggers no rebuild, so this runs unconditionally (unlike the Lovable push).
+- `/scanner-apk` now serves the canonical `outputs/apk/debug` build (was a stale
+  `intermediates/` path). Rebuilt + installed the discovery-capable APK on the phone.
+
+### Tunnel resilience — the "restarted but frontend can't connect" bug
+- Root cause: trycloudflare quick tunnels keep the cloudflared PID alive while the edge
+  control-stream dies (`control stream encountered a failure` + `Retrying connection`).
+  `--restart` reused the dead tunnel by PID → public URL served nothing (HTTP 000).
+- Fix: `tunnel_reachable()` HTTP-checks the URL before reuse; a zombie is torn down and
+  replaced. Because that changes the URL, Lovable is now synced on that restart too (sync
+  fires whenever the URL changed, even without `--sync-lovable`; same-URL restart = no push).
+  Verified: dead URL → False, live URL → True.
+
+### Scanner OCR — reverted a change; DO NOT redesign the reader
+- Diagnosed a scan failure as an out-of-focus footer capture (crop was pure bokeh) +
+  fallbacks disabled (`bronze.card_orb_descriptors` table absent → visual off; `easyocr`
+  not installed → title off), NOT broken OCR logic. Raised the phone's OkHttp timeouts
+  (10s → 30s) so slow no-match scans don't SocketTimeout. Reverted a `full_footer` fast-mode
+  tweak — user: the reader works, don't remake it.
+
+---
+
+## 2026-07-03 — Phase 1: card detail view + scan page rebuild (browser→app + manual code) (NEEDS TESTING)
+
+Native scanner app now works well; pivoted focus to the web app. Agreed a roadmap
+(see memory `fab-roadmap.md`): card detail view → email accounts + named cardlists →
+graphic overhaul → hybrid app → **card-trading platform**. Started Phase 1.
+
+### Done + pushed to Lovable (frontend, `retro-data-display`)
+- **Card detail modal** (`CardDetailModal.tsx`): click a printing (grid or list) → full
+  detail: large image, stat chips (cost/attack/defense/life/intellect/pitch, only the
+  non-empty ones), type line, rules text (renders `**bold**` + `{r}` tokens), and prices —
+  **EUR and USD each with its own SEK** + headline SEK + source/confidence. Replaced the
+  list-view side panel with this one shared modal. Wired via `onSelect` through
+  CardGrid/CardGroupItem/CardItem and CardListView; state lives in `Index.tsx`.
+- **Bigger detail image** (~1.7×, `max-w-4xl` + 380px column) and **oldest-printing art**:
+  `groupCards.ts` `best_image` now uses the oldest printing (sorted oldest→newest).
+- **Scan page fully rebuilt** (`Scanner.tsx`): removed ALL browser camera/OCR code. Now
+  (1) "Scan with the app" — download link (`/scanner-apk`) + pair code (email → `/scan/session`,
+  live sync via `/scan/records`), and (2) "Type a code" — manual entry via `/scan/code`.
+  Kept cardlist/printing-picker/edit/price-toggle/totals. Bundle shrank; tsc + build pass.
+
+### Done but UNCOMMITTED + NOT YET LIVE (backend, `api.py`) — needs API restart
+- `/cards` now returns the fluff fields (`health`, `intelligence`, `functional_text`; cost/
+  power/defense/type_text already were) + computed `price_eur_sek` / `price_usd_sek`
+  (USD/SEK rate from `bronze.exchange_rates`). Verified via direct SQL.
+- New **`GET /scan/code?code=HVY050`** — manual entry: `_parse_code`+`_snap_code`+printings.
+  Verified: handles lowercase + OCR-style typos (`HVYO5O`→HVY050), null for garbage.
+- **To make Phase 1 testable tomorrow: `./run_pipeline.sh --restart`** (loads new api.py;
+  reuses the persistent tunnel, no Lovable rebuild). `api.py` change not committed yet.
+
+### Deliberately NOT done (flagged, do carefully)
+- Backend removal of the now-orphaned `/scan` + `/scan/debug` + `_ocr_claude`/`_ocr_google`.
+  Reason: `/scan/native` (the working app) still SHARES `_ocr_easyocr` (title OCR) and
+  `_visual_match` (visual fallback), so the earlier "remove easyocr" scope conflicts —
+  remove only the browser-only bits, keep the app's fallbacks. Also api.py is edited in
+  parallel; do this as a focused pass.
+
+### Next session
+1. `./run_pipeline.sh --restart`, then TEST: detail modal fields, manual `HVY050` entry,
+   app pair flow. Tweak detail layout/fields as needed.
+2. Commit `api.py` (fluff + `/scan/code`) to `fab` repo when happy.
+3. Careful backend `/scan` dead-code removal (keep `/scan/native` intact).
+4. Phase 2: magic-link email accounts + server-side named cardlists (email = portable
+   account; expand profile later: username, trade mail, deal history, profit-since-scan).
+
+---
+
+## 2026-07-02 — Pipeline hardening + scanner usability pass
+
+### Pipeline / serving
+- Reworked the daily launcher so `./run_pipeline.sh` is the normal data refresh + serve
+  path and `./run_pipeline.sh --restart` is a quick API/tunnel restart only.
+- `run_pipeline.sh` now checks whether Postgres is already reachable before trying Docker,
+  avoiding a pointless sudo/docker stall when the DB is already up.
+- `start_fab.py` now keeps Git/Lovable sync opt-in (`--sync-lovable` or `PUSH_LOVABLE=1`)
+  outside the daily pipeline path, uses timeouts for git commands, and does not let a
+  stuck push block API startup.
+- Persistent tunnel handling was hardened: stale/poisoned pidfiles are recovered by
+  finding the running cloudflared process, and the pidfile is not written until a URL is
+  actually found. Current tunnel remains in `tmp/logs/tunnel_url.txt`.
+
+### Frontend scanner
+- Cleaned up `retro-data-display/src/pages/Scanner.tsx` and pushed it to the frontend repo:
+  `a8e53ba feat: simplify scanner pairing UI`.
+- The scanner page now presents a trade-session flow instead of exposing URL/code fields
+  by default: start session, pair phone, optional reveal/copy code, trading name, and phone
+  scan polling into the editable list.
+- Verified `npm --prefix retro-data-display run build` and confirmed `origin/main` points
+  at `a8e53ba6529a6862bc8931d700f7ece2f3727b00`.
+
+### Android scanner
+- Updated `fab-scanner-android/app/src/main/java/com/fabscanner/app/MainActivity.kt` so the
+  main flow is pair-code first, with the API URL hidden under Advanced.
+- Default API base points at the current Cloudflare URL so normal users should not need to
+  type a backend URL.
+- Widened the footer crop sent from the phone so the backend can search the 2-5 mm footer
+  code whether it is centered or left aligned.
+- Verified Kotlin compile and debug APK build using Android Studio's JBR:
+  `JAVA_HOME=/snap/android-studio/232/jbr GRADLE_USER_HOME=/home/tango/Projects/fab/fab-scanner-android/.gradle ./gradlew :app:assembleDebug`.
+- Installed and launched the debug APK via ADB at least once. Wireless debugging can still
+  fall into stale pairing state; reboot remains the known reset.
+
+### Backend scanner matching
+- `/scan/native` now prioritizes footer-code OCR over visual guessing and stores
+  successful session scans in `app.scanned_cards`.
+- `_read_footer_code()` searches multiple footer subwindows: lower-left, centered, wide,
+  and full footer variants. This matches the physical card layout where the black footer is
+  about 2 mm from the bottom and the code sits roughly 2-5 mm from the bottom.
+- `_parse_code()` now refuses partial collector numbers, so fragments like `BET7` do not
+  snap to random cards. It also corrects common set-code OCR mistakes such as `R05 130` or
+  `ENR05130MK` into `ROS130`.
+- Fusion now requires footer code, strong title match, or visual+title agreement. Visual-only
+  guesses are intentionally suppressed because they produced wrong-card matches.
+- Verified `.venv/bin/python -m py_compile api.py`.
+
+### Open / next
+- The current phone-to-web flow is a lightweight local trade session, not a real
+  account/device system. A real account system still needs persistent users, login,
+  device pairing tokens, and ownership/permission rules.
+- `easyocr` is intentionally not installed because it tried to pull a huge PyTorch/CUDA
+  stack. Footer OCR uses `pytesseract`; title OCR fallback is limited unless a lighter
+  dependency plan is chosen.
+- Root project is still a local dirty workspace with several uncommitted implementation
+  changes. The Android project is local/untracked from the root repo unless that is
+  intentionally committed later.
+
+---
+
+## 2026-07-01 — Android scanner pairing/build recovery note
+
+- User ran the pipeline, paired the phone, launched the Android app, then hit a
+  component/exception-style failure. The phone pairing closed immediately afterward.
+- Local ADB server can start, but `adb devices -l` showed no connected devices after the
+  failure, while the phone still claimed it was paired and Android Studio could not find it.
+- User-observed recovery rule: when wireless debugging pairing gets into this state, a full
+  computer restart is required before the phone can be paired again. Treat repeated pairing
+  attempts before reboot as wasted time unless new evidence says otherwise.
+- Fixed `fab-scanner-android/debug_phone.sh`: debug builds install as
+  `com.fabscanner.app.debug`, while the activity class remains
+  `com.fabscanner.app.MainActivity`. The old script launched `com.fabscanner.app`, which
+  could produce misleading component/start failures.
+- Verified after the script fix: `./gradlew :app:assembleDebug --quiet` passes using
+  `/snap/android-studio/232/jbr` and `GRADLE_USER_HOME=/tmp/fab-gradle`.
+- Next attempt after reboot: pair/connect the phone again, confirm `adb devices -l` shows
+  state `device`, then run `fab-scanner-android/debug_phone.sh` to install, launch, and
+  stream `FabScanner`/`AndroidRuntime` logs.
+
+## 2026-07-01 — Native scanner phone-to-web session sync (DONE)
+
+- Added lightweight scanner sessions: `POST /scan/session` creates/joins a short
+  alphanumeric `session_code` with optional email/label.
+- `/scan/native` now accepts `session_code`/`session_email`; high-confidence stored scans
+  are tagged in `app.scanned_cards`.
+- `/scan/records` now supports `session_code` + `after_id` and returns printings so the web
+  scanner page can poll new phone scans directly into the editable cardlist.
+- Android MVP now has a session-code input saved in app preferences and sends the code on
+  every native scan request.
+- Frontend `/scan` now has a Phone sync panel. Create a code in the browser, enter it on
+  the phone, then scans append to My Cardlist where quantity, set/foiling edits, removal,
+  and pricing already work.
+- Verified: `python -m py_compile api.py`, `npm --prefix retro-data-display run build`,
+  local `POST /scan/session`, and session-filtered `/scan/records`.
+- Could not validate Android CLI build from Codex shell because `JAVA_HOME`/`java` is not
+  on PATH; Android Studio should build/run after syncing `MainActivity.kt`.
+
+---
+
+## 2026-06-29 — Camera scanner (browser → native app), persistent tunnel, git init + GitHub (DONE)
+
+### Context / why
+After yesterday's data cleanup the app went live again, but (a) the Lovable frontend was
+"not connected to the DB", (b) the camera scanner was the next feature, and (c) restarting
+the server kept forcing a Lovable rebuild. Worked through all three; the camera ended the
+day pivoting from the browser to a native Android app.
+
+### Frontend "not connected" — root cause + fix
+- The `.env` already held the live tunnel URL, but the commit carrying it was **never pushed**
+  (`origin/main` still had the previous, dead URL), so Lovable kept building against a dead
+  tunnel. The earlier "fix" only addressed the push *failing*, not the URL churn.
+- True cause of the failed push: **no git credential helper** → HTTPS push prompted for a
+  password, which GitHub rejects. Fixed with `gh auth setup-git` (git now uses the `gh` token).
+- Hardened `start_fab.py` `sync_lovable`: `GIT_TERMINAL_PROMPT=0` (fail fast, no hang),
+  verify the commit actually reached the remote (`ls-remote` vs local HEAD), loud actionable
+  failure pointing at `gh auth setup-git`.
+
+### Camera scanner — code/`display_id` approach (backend kept, browser UI abandoned)
+- **Key insight (user):** don't recognise the art — read the bottom-left code (`R EN | HVY050`).
+  `HVY050` **is** our `gold.display_id`, so it pins set+number deterministically.
+- **Backend `/scan` `code` engine** (`api.py`): OCR the footer with Tesseract (`pytesseract`,
+  whitelisted single line), `_parse_code` extracts the `LETTERS+digits` token, `_snap_code`
+  snaps it to the **known** display_id vocabulary (122 set codes / ~9.3k ids) with OCR-confusion
+  fixup (`O/0 I/1 S/5 B/8 Z/2 G/6`). Returns the exact card + its ≤6 printings. Snap tested
+  8/8 on simulated noise incl. set-code corruption (`HVYO5O`→`HVY050`). Added `pytesseract`
+  to `requirements-ocr.txt` (system `tesseract-ocr` binary required).
+- **Browser capture — TRIED, ABANDONED.** In order: code-crop OCR; sharpness gate + focus
+  meter; 4K capture + continuous AF + tap-to-focus; real sensor zoom + manual-focus slider +
+  capability diagnostics; WYSIWYG fixes (match preview box to capture aspect, drop double
+  zoom); finally native-camera `<input capture>` + draggable bottom band. **Why abandoned:**
+  `getUserMedia`/`ImageCapture.takePhoto()` give a crippled camera — the footer stayed too
+  soft for OCR even when correctly framed (diagnostics on the user's phone showed full 4K +
+  sensor zoom + manual focus available, yet still blurry). The native camera app focuses
+  fine, so the browser path is a dead end for tiny footer text.
+- **Decision → native Android app.** `fab-scanner-android/` CameraX MVP (card guide, footer
+  sharpness gate, refocus, torch, zoom) posting multi-signal to the new **`/scan/native`**
+  (`full_image` visual + `footer_crop` exact `display_id` OCR + `title_crop` fuzzy title;
+  signals fuse into a confidence). Reuses `_snap_code`/`_ocr_code_tesseract`. Debug crops →
+  `tmp/scan_debug_samples/`. Superseded 2026-07-02: Android Studio/SDK are now installed
+  enough for Gradle/ADB builds and USB APK installs.
+
+### Persistent Cloudflare tunnel (no more rebuild-on-restart)
+- `start_fab.py` now runs cloudflared **detached** (pidfile `tmp/logs/cloudflared.pid`,
+  logs to `cloudflared.out`) so it **outlives API restarts**. On start it reuses a live
+  tunnel (same URL ⇒ `sync_lovable` no-ops ⇒ no Lovable rebuild); Ctrl+C stops only the API.
+  Flags: `--new-tunnel` (force fresh URL), `--stop-tunnel`.
+- One-time transition cost: the first `--restart` on the new code couldn't see the old
+  (untracked) tunnel, so it minted one new URL + one Lovable push. Verified the new tunnel
+  is now tracked (pid 126494) and the **next** restart reuses it.
+
+### Launcher rework — `run_pipeline.sh`
+One entry point with modes: default (full pipeline + serve, **skips ingest/dbt if already
+run today** via `tmp/logs/.pipeline_done`), `--restart` (serve only — everyday restart),
+`--full`, `--no-serve`, `--new-tunnel`, `--stop`, `--help`. `exec`s into `start_fab.py` so
+Ctrl+C lands there. Removed hardcoded `[1/4]` labels; JustTCG already gone from the path.
+
+### Git — the parent repo had no history
+- Discovered the top-level `fab` repo's `.git/` was **empty** (no commits/refs/remote;
+  contradicted the session's "is a git repo"). Surfaced it rather than silently re-init.
+- Per user: fresh `git init`, initial commit `0663f27` (37 files), branch renamed `master`→
+  `main`. Excluded `.env`, `tmp/`, `.venv/`, dbt artifacts, and the nested `retro-data-display/`
+  (its own repo); caught + ignored a stray `*.log`.
+- Created **public** GitHub repo **GHT4ngo/fab** and pushed `main`. Scanned tracked files for
+  real key formats before going public — none; `.env` returns 404 on GitHub.
+
+### State at end of day
+- Backend `/scan` (code engine) + `/scan/native` live; `api.py` modified accordingly.
+- Web camera scanner shelved; native app is the path forward.
+- Persistent tunnel + `run_pipeline.sh --restart` = restart server without Lovable churn.
+- `fab` and `retro-data-display` both version-controlled and backed up on GitHub.
+
+---
+
 ## 2026-06-28 — Admin quality dashboard + tcgcsv composite-product cleanup (DONE)
 
 ### Context / why
@@ -50,8 +304,9 @@ edition-`N` set entries for existing sets.
 ### Operational note
 `run_pipeline.sh` rebuilt the DB but initially failed to serve because an old `start_fab.py`
 left uvicorn on port 8001. Stopped the stale process and restarted `start_fab.py`.
-The live quick-tunnel URL changes on each restart; current URL is stored in
-`tmp/logs/tunnel_url.txt` and mirrored to `retro-data-display/.env`.
+Superseded 2026-07-02: the quick tunnel is now persistent across normal API restarts.
+Current URL is stored in `tmp/logs/tunnel_url.txt` and mirrored to `retro-data-display/.env`
+only when Lovable sync is explicitly requested and needed.
 
 ---
 
@@ -215,6 +470,64 @@ flagged that the hand-built Cardmarket crosswalk ("my manual work") might not be
 - **New `GET /admin/price-discrepancies`** to validate the manual crosswalk: normalises EUR
   & USD to SEK and flags cards where they diverge (params: tier [default 1=manual],
   min_ratio [2.0], min_sek [25], paging).
+
+## 2026-06-29 — Scanner pivot: browser limits → Android CameraX MVP (IN PROGRESS)
+
+### Context
+User wants fast phone scanning for Flesh and Blood cards without per-card button presses or
+manual box adjustment. Initial browser scanner attempted to read the footer code such as
+`C CRU117`, because that encodes edition/set/card number. Multiple browser changes were
+pushed to `retro-data-display`, ending at:
+- `bd1f746 feat: add live card scanner frame`
+- `b25e0ed fix: scan full footer strip`
+- `fba96b7 fix: improve scanner camera focus`
+
+Browser debug mode saved crops to `tmp/scan_debug_samples/`. Inspection showed the crop was
+finally on the footer strip, but the actual text pixels were still too soft/blurry for OCR.
+Conclusion: the failure is camera acquisition/focus in mobile browser video, not Tesseract
+parsing. Commercial apps like Dragon Shield/ManaBox likely use native camera control,
+sharpest-frame selection, whole-card visual matching, OCR as secondary signal, and
+confidence fusion.
+
+### Backend changes (local, not pushed to remote)
+- `api.py` now supports `debug_save` on `/scan`; saved scan images + `.txt` metadata go to
+  `tmp/scan_debug_samples/`.
+- Added `/scan/native` accepting:
+  - `full_image` — full card crop for visual matching,
+  - `footer_crop` — footer strip for exact `display_id` OCR,
+  - `title_crop` — title area for fuzzy name OCR,
+  - `debug_save`.
+- Fusion order: footer OCR exact match first; then full-card visual match; then title OCR.
+  If visual and title agree, confidence is boosted. Endpoint returns `confidence`,
+  `method`, `display_id`, `name`, `matches`, `printings`, `candidates`, and debug paths.
+- Guard added so all-letter OCR chunks like `CRUIIT...` no longer silently become `CRU111`.
+- Verified: `.venv/bin/python -m py_compile api.py`.
+
+### Android MVP scaffold
+Created `fab-scanner-android/`:
+- Kotlin + CameraX Android Studio project.
+- `MainActivity.kt`: rear camera preview, card guide, tap/refocus, torch toggle, 2x zoom,
+  RGBA frame analyzer, footer sharpness gate, full/footer/title crops, POST to
+  `/scan/native`.
+- `CardGuideView.kt`: card frame + bottom footer strip overlay.
+- `README.md`: setup/run notes.
+- `.gitignore` updated for Android build/editor artifacts.
+
+### Toolchain status / tomorrow
+- This machine has no `java`, no `gradle`, and no Android SDK.
+- `sudo snap install android-studio --classic` was attempted, but sudo password prompt was
+  not completed; install was cancelled.
+- Tomorrow:
+  1. Run `sudo snap install android-studio --classic`.
+  2. Launch `android-studio`.
+  3. Open `/home/tango/Projects/fab/fab-scanner-android`.
+  4. Let Android Studio install SDK/Gradle dependencies.
+  5. Set `apiBase` in `MainActivity.kt` to a phone-reachable URL (current cloudflared
+     tunnel or LAN IP, not emulator-only `10.0.2.2`).
+  6. Run on Android phone with USB debugging.
+  7. Inspect `tmp/scan_debug_samples/` from native submissions to confirm image quality.
+
+---
 
 ### Finding (actionable)
 The audit immediately flagged **~146 tier-1 (manual) matches** diverging ≥3× (≥50 SEK), all

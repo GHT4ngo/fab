@@ -7,6 +7,8 @@ setup/run docs), `AGENTS.md` (Codex-specific handoff notes), and `agent_worklog.
 ## What this is
 A Flesh and Blood TCG card-data app: ingest → PostgreSQL (bronze/silver/gold) →
 FastAPI → Vite/React frontend (hosted on Lovable, fallback self-hosted same-origin).
+A native Android scanner MVP now also exists under `fab-scanner-android/` for camera
+capture experiments; it talks to the same FastAPI backend.
 
 ```
 sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.silver_cards ──▶ gold.gold_cards ──▶ api.py ──▶ frontend
@@ -93,7 +95,8 @@ so the derived pitch is aliased `derived_pitch` to avoid an ambiguous-column cla
   (NOT the standard `PGHOST`/`PGPASSWORD`). DB name is `fab`.
 - New bronze table → add it to `setup_db.py` `CREATE_TABLES_SQL` (idempotent
   `CREATE TABLE IF NOT EXISTS`) AND an `ok()` line; setup_db is the single source of schema.
-- Don't commit the frontend working tree — only `.env` is safe to push (see start_fab.py).
+- The frontend working tree often has unrelated generated/scaffold drift. When pushing
+  frontend work, stage only the intended files; `.env` URL sync is handled separately.
 - `tmp/` is throwaway/regenerable (download cache, pgdata, logs, cloudflared). Never rely
   on it for source-of-truth.
 
@@ -106,19 +109,92 @@ sudo docker compose up -d db          # docker needs sudo here (non-interactive 
 .venv/bin/python ingest_tcgcsv.py     # USD prices + missing sets (fast, no rate limit)
 ( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt run --profiles-dir . )
 ( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt test --profiles-dir . )
-.venv/bin/python start_fab.py         # API :8001 + Cloudflare tunnel + Lovable sync
+.venv/bin/python start_fab.py         # API :8001 + persistent tunnel; no Git push by default
 ```
-Full pipeline: `./run_pipeline.sh` (`--no-serve` to skip API/tunnel).
+`run_pipeline.sh` is the single launcher (modes, not just `--no-serve`):
+- `./run_pipeline.sh` — daily path: ingest if needed, dbt, serve, and sync Lovable/GitHub
+  when the public API URL needs updating.
+- `./run_pipeline.sh --restart` — quick server restart only; skips ingest/dbt. Reuses the
+  tunnel **only if its public URL still responds** (see below); if the tunnel URL changed
+  it DOES sync Lovable (a stale frontend URL is the whole point of fixing).
+- `--full` force the pipeline; `--no-serve` pipeline only; `--new-tunnel` fresh URL;
+  `--stop` kill the tunnel; `--sync-lovable` / `--no-sync-lovable`; `--help`.
+
+The Cloudflare tunnel is now **persistent**: `start_fab.py` runs cloudflared detached
+(pidfile `tmp/logs/cloudflared.pid`) so it **survives API restarts** → the URL stays put and
+Lovable is **not** rebuilt on every restart. **Reuse is gated on an actual HTTP reachability
+check (`tunnel_reachable`), not just a live PID** — trycloudflare quick tunnels frequently
+keep the cloudflared process alive while the edge control-stream has died (log:
+`control stream encountered a failure` + `Retrying connection`). A live-but-dead tunnel was
+the cause of "restarted but the frontend can't connect": the old code reused it by PID. Now
+a zombie tunnel is torn down and replaced with a fresh one on the next start. Because that
+changes the URL, Lovable **is** synced on that restart (sync fires whenever the URL changed,
+even without `--sync-lovable`; a normal same-URL restart still causes no push/rebuild).
+`start_fab.py` also publishes every URL to a gist for the native app (`publish_endpoint`,
+always, no rebuild). Git timeouts are nonblocking so API startup does not hang on `git push`.
+URL changes on reboot, tunnel death (now auto-detected + replaced), or `--new-tunnel`.
+`--stop-tunnel` tears it down.
+
+The `fab` repo is on GitHub at **GHT4ngo/fab** (public). Pushing over HTTPS uses the `gh`
+token as git's credential helper — if a push prompts for a password, run `gh auth setup-git`
+once (GitHub rejects passwords). The `retro-data-display` frontend is a **separate** repo
+(its own remote); the parent repo gitignores it.
 
 Latest verified post-cleanup shape (2026-06-28): `gold.gold_cards` has 17,256 rows,
 93.3% price coverage, 0 delimited display IDs, and all 13 dbt tests pass.
 
+## Card detail view (2026-07-03, Phase 1 — pending API restart to fully work)
+- Frontend `CardDetailModal.tsx`: click a printing (grid or list) → full detail (image,
+  stat chips, type, rules text, EUR+USD each in SEK, source/confidence). Wired via
+  `onSelect` from `Index.tsx` through CardGrid/CardGroupItem/CardItem + CardListView.
+- `/cards` now also returns `health`/`intelligence`/`functional_text` and computed
+  `price_eur_sek`/`price_usd_sek` (USD/SEK rate from `bronze.exchange_rates`). Grouped card
+  art uses the **oldest** printing's image (`groupCards.ts`).
+- `api.py` changes are UNCOMMITTED + need `./run_pipeline.sh --restart` to go live.
+
+## Scanner work
+- **Web scan page has NO browser camera anymore** (removed 2026-07-03). It is two paths:
+  (1) pair the native app (download `/scanner-apk`, pair code via `/scan/session`, live sync
+  via `/scan/records`), and (2) manual code entry via **`GET /scan/code?code=HVY050`**
+  (`_parse_code`+`_snap_code`, typo-corrected). The native app is the primary scanner.
+- The old browser `POST /scan` (+ `/scan/debug`, `_ocr_claude`, `_ocr_google`) is now
+  orphaned — remove it carefully later; `/scan/native` still shares `_ocr_easyocr` (title)
+  and `_visual_match` (visual fallback), so don't delete those.
+- Browser debug crops showed the footer strip was correctly framed but physically too soft
+  for OCR, so footer OCR alone is not viable in browser video (why the native app won).
+- Backend has local `/scan/native` for Android/native submissions:
+  `full_image`, `footer_crop`, `title_crop`, `debug_save`, `session_code`.
+- Lightweight session flow: web creates a short code at `/scan/session`, phone submits
+  scans with that code, and web polls `/scan/records`. This is not a real account system.
+- Footer code is the primary decision path. Android sends a broad lower footer band, and
+  backend searches multiple subwindows for codes near the lower-left/center footer. OCR
+  set-code corrections handle reads like `R05 130` → `ROS130`, while partial collector
+  reads are refused so `BET7` cannot snap to a random `BET###` card.
+- Fusion order: footer OCR exact `display_id`; strong title match; visual+title agreement.
+  Visual-only guesses are intentionally not returned.
+- Debug crops and metadata save to `tmp/scan_debug_samples/`.
+- `fab-scanner-android/` is a CameraX MVP with card guide, footer sharpness gate, refocus,
+  torch, zoom, hidden Advanced API URL field, pair-code field, and POST to `/scan/native`.
+- Android Studio/SDK are installed enough for local Gradle/ADB checks. Verified build:
+  `JAVA_HOME=/snap/android-studio/232/jbr GRADLE_USER_HOME=/home/tango/Projects/fab/fab-scanner-android/.gradle ./gradlew :app:assembleDebug`.
+  The debug APK has been installed and launched on the phone at least once.
+
 ## Gotchas
-- Python 3.14 venv at `.venv`. OCR deps are heavy → `requirements-ocr.txt` (separate).
+- Python 3.14 venv at `.venv`. Scanner deps currently installed: `numpy`,
+  `opencv-python-headless`, `pytesseract`. `easyocr` is intentionally not installed because
+  it pulls a very large PyTorch/CUDA stack.
+- Native app debug package id is `com.fabscanner.app.debug`; activity remains
+  `com.fabscanner.app.MainActivity`.
+- Wireless debugging can get stuck in stale pairing state. If repeated `adb pair/connect`
+  attempts fail while the phone claims it is paired, a full computer restart has been the
+  reliable reset.
 - Frontend scaffolded with bun; `npm install` needs `--legacy-peer-deps`.
-- `start_fab.py` rewrites `retro-data-display/.env` + pushes each run (ephemeral tunnel
-  URL). Use `PUSH_LOVABLE=0` when testing so you don't push a dead URL.
-- If port 8001 is already in use, check for stale `start_fab.py`/uvicorn/cloudflared
-  processes before rerunning. The API reads gold live, but code changes require a restart.
-- Docker requires sudo in this environment; `run_pipeline.sh` falls back to `sudo docker`
-  which fails non-interactively. Start the DB container separately or add user to `docker` group.
+- `start_fab.py` rewrites/pushes `retro-data-display/.env` when the tunnel URL changed
+  (with `--sync-lovable`/`PUSH_LOVABLE=1`, or automatically on any restart where the URL
+  changed — e.g. a dead tunnel was replaced). A same-URL restart pushes nothing (no rebuild
+  churn). Normal `./run_pipeline.sh` is the daily sync path.
+- If port 8001 is already in use, check for stale `start_fab.py`/uvicorn processes before
+  rerunning (Ctrl+C on `start_fab` now stops only the API; the tunnel stays up — kill it
+  with `--stop-tunnel`). The API reads gold live, but code changes require a restart.
+- Docker requires sudo in this environment, but `run_pipeline.sh` first checks whether
+  Postgres is already reachable and skips Docker startup when it is.
