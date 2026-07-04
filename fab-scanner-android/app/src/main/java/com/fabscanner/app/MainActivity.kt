@@ -61,6 +61,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var apiRow: LinearLayout
     private lateinit var sessionInput: EditText
     private var camera: Camera? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var cameraOn = true
     private var torchOn = false
     private var apiBase = DEFAULT_API_BASE
     private var showAdvanced = false
@@ -176,6 +178,13 @@ class MainActivity : ComponentActivity() {
         })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row.addView(Button(this).apply {
+            text = if (cameraOn) "Cam On" else "Cam Off"
+            setOnClickListener {
+                toggleCamera()
+                text = if (cameraOn) "Cam On" else "Cam Off"
+            }
+        })
+        row.addView(Button(this).apply {
             text = "Refocus"
             setOnClickListener { focusAtCenter() }
         })
@@ -215,37 +224,59 @@ class MainActivity : ComponentActivity() {
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
             try {
-                val provider = providerFuture.get()
-                val preview = Preview.Builder()
-                    .setTargetResolution(Size(1920, 1080))
-                    .build()
-                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
-                val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(1920, 1080))
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor) { image -> analyze(image) }
-                    }
-
-                provider.unbindAll()
-                camera = provider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    analysis,
-                )
-                camera?.cameraControl?.setZoomRatio(2.0f)
-                status.text = "Scanning"
-                Log.i(LOG_TAG, "CameraX bound successfully")
-                focusAtCenter()
+                cameraProvider = providerFuture.get()
+                if (cameraOn) bindCamera() else stopCamera()
             } catch (e: Exception) {
                 Log.e(LOG_TAG, "CameraX startup failed", e)
                 status.text = "Camera failed: ${e.javaClass.simpleName}"
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /** Bind preview + analysis so the camera runs and frames are scanned/posted. */
+    private fun bindCamera() {
+        val provider = cameraProvider ?: return
+        val preview = Preview.Builder()
+            .setTargetResolution(Size(1920, 1080))
+            .build()
+            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+        val analysis = ImageAnalysis.Builder()
+            .setTargetResolution(Size(1920, 1080))
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also { it.setAnalyzer(cameraExecutor) { image -> analyze(image) } }
+
+        provider.unbindAll()
+        camera = provider.bindToLifecycle(
+            this,
+            CameraSelector.DEFAULT_BACK_CAMERA,
+            preview,
+            analysis,
+        )
+        camera?.cameraControl?.setZoomRatio(2.0f)
+        cameraOn = true
+        status.text = "Scanning"
+        Log.i(LOG_TAG, "CameraX bound successfully")
+        focusAtCenter()
+    }
+
+    /** Unbind everything: preview + analysis stop, so NO frames are scanned or posted. */
+    private fun stopCamera() {
+        cameraProvider?.unbindAll()
+        camera = null
+        cameraOn = false
+        torchOn = false
+        busy = false
+        status.text = "Camera off — tap Camera to scan"
+        Log.i(LOG_TAG, "CameraX unbound (camera off)")
+    }
+
+    /** Toggle the camera on/off — off means zero API traffic while you're not scanning. */
+    private fun toggleCamera() {
+        if (cameraProvider == null) { startCamera(); return }
+        if (cameraOn) stopCamera() else bindCamera()
     }
 
     private fun focusAtCenter() {
@@ -264,6 +295,7 @@ class MainActivity : ComponentActivity() {
 
     private fun analyze(image: ImageProxy) {
         try {
+            if (!cameraOn) return
             if (sessionCode.isBlank()) {
                 runOnUiThread { status.text = "Enter pair code" }
                 return
