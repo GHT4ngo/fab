@@ -143,14 +143,41 @@ once (GitHub rejects passwords). The `retro-data-display` frontend is a **separa
 Latest verified post-cleanup shape (2026-06-28): `gold.gold_cards` has 17,256 rows,
 93.3% price coverage, 0 delimited display IDs, and all 13 dbt tests pass.
 
-## Card detail view (2026-07-03, Phase 1 — pending API restart to fully work)
+## Card detail view (Phase 1, DONE + live)
 - Frontend `CardDetailModal.tsx`: click a printing (grid or list) → full detail (image,
   stat chips, type, rules text, EUR+USD each in SEK, source/confidence). Wired via
   `onSelect` from `Index.tsx` through CardGrid/CardGroupItem/CardItem + CardListView.
-- `/cards` now also returns `health`/`intelligence`/`functional_text` and computed
+- `/cards` also returns `health`/`intelligence`/`functional_text` and computed
   `price_eur_sek`/`price_usd_sek` (USD/SEK rate from `bronze.exchange_rates`). Grouped card
   art uses the **oldest** printing's image (`groupCards.ts`).
-- `api.py` changes are UNCOMMITTED + need `./run_pipeline.sh --restart` to go live.
+- Manual code entry: `GET /scan/code?code=HVY050` (typo-corrected).
+
+## Accounts + cardlists (Phase 2, DONE + live)
+Passwordless magic-link accounts + server-side named cardlists. Tables live in the `app`
+schema (`setup_db.py` is canonical; `api.py` self-migrates via `ensure_app_auth_schema`):
+`app.users`, `app.magic_tokens` (15-min TTL), `app.sessions` (30-day bearer token),
+`app.cardlists`, `app.cardlist_items` (UNIQUE(list, printing), qty).
+- **Auth**: `POST /auth/request-link` (mints token), `GET /auth/verify?token=` (→ session
+  token), `GET /auth/me`, `POST /auth/logout`. Session via `Authorization: Bearer <token>`
+  resolved by the `_current_user` FastAPI dependency (401 if missing/expired).
+- **Cardlists CRUD**: `GET/POST /cardlists`, `GET/PATCH/DELETE /cardlists/{id}`,
+  `POST /cardlists/{id}/items` (adds to qty on conflict), `PATCH`/`DELETE
+  /cardlists/{id}/items/{printing}`. Ownership enforced everywhere (`_get_owned_cardlist`).
+- **EMAIL IS DEV-MODE**: the magic link is returned in the response (`dev_link`) + logged,
+  NOT emailed. Swap `_deliver_magic_link()` for a real sender (Resend/SMTP) to go live.
+- Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.tsx`
+  (AuthProvider), `src/pages/Account.tsx`, `AddToListButton`, `SaveScanToListButton`.
+
+## Frontend design system (Phase 3, locked)
+`retro-data-display/src/index.css` is the **locked** system (Neurotech/Netrunner: deep
+blue-black, cyan primary, magenta accent, Orbitron + Share Tech Mono). Reusable primitives —
+prefer these over ad-hoc classes: `.panel`, `.panel-raised`, `.panel-hover`,
+`.section-title` (cyan header + accent underline), `.hud-frame` (corner brackets), `.chip`,
+`.divider-glow`, plus refined `.text-glow`/`.glow-card`/`.glitch`. Notes: default borders are
+intentionally soft (bright cyan is an *accent*, not the whole UI); the page background aura
+lives on `body` — do NOT put a solid `bg-background` on a page wrapper (it hides the aura and
+makes tabs look inconsistent). The native app mirrors this via a `Theme` palette +
+`cyberButton`/`styleInput` helpers and a HUD `CardGuideView`.
 
 ## Scanner work
 - **Web scan page has NO browser camera anymore** (removed 2026-07-03). It is two paths:

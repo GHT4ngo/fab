@@ -6,6 +6,54 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-04 — Phase 2 frontend + Phase 3 visual overhaul + scanner app revamp
+
+Everything below is committed + pushed (fab → GitHub GHT4ngo/fab; frontend →
+GHT4ngo/retro-data-display, which triggers the Lovable rebuild). The self-hosted dist is
+rebuilt each time so the tunnel URL shows changes instantly.
+
+### Phase 2 frontend (retro-data-display) — DONE, verified end-to-end on live :8001
+- `src/lib/auth.ts` — magic-link auth + cardlist API client; session token in localStorage,
+  sent as `Authorization: Bearer`. `devLogin(email)` = request-link then auto-verify the
+  returned `dev_link` (dev-mode shortcut; real email later is a one-function swap).
+- `src/hooks/useAuth.tsx` — AuthProvider/useAuth: restores session on load, honours a
+  `?token=` magic link, dev sign-in. Wrapped around the app in `App.tsx`.
+- `src/pages/Account.tsx` — new **Account** tab: email sign-in, create/rename/open/delete
+  lists, per-item qty controls.
+- `AddToListButton` (card detail modal) + `SaveScanToListButton` (bulk-save a whole scanned
+  session) — both nudge signed-out users to the Account tab.
+
+### Scanner app (fab-scanner-android) — two changes
+- **Camera on/off toggle** ("Cam On/Cam Off"): `bindCamera`/`stopCamera`/`toggleCamera`
+  unbind the camera so NO frames are analyzed or POSTed while off (user: don't spam the API).
+- **Professional cyber UI revamp**: glowing FAB SCANNER header, rounded translucent control
+  panel with cyan outline, cyber-styled buttons/inputs (`cyberButton`/`styleInput` + a
+  `Theme` palette mirroring the web), and a HUD `CardGuideView` (cyan corner brackets + faint
+  frame + cyan footer target strip) replacing the plain green rectangle. Verified via adb
+  screenshot. `/scanner-apk` now serves `outputs/apk/debug` (was a stale `intermediates` path).
+
+### Phase 3 visual overhaul (roadmap step 3) — locked design system, applied app-wide
+- `src/index.css` is now the **locked system**: deep layered aura background, softer default
+  borders (bright cyan reserved for accents), tamed/slower scanline + edge-masked grid,
+  removed the blanket `button:hover` neon (→ tasteful `:focus-visible` ring). New reusable
+  primitives: `.panel`, `.panel-raised`, `.panel-hover`, `.section-title`, `.hud-frame`,
+  `.chip`, `.divider-glow` (existing `text-glow`/`glow-card`/`glitch` kept + refined).
+- Applied across Nav (uniform `border-b-2` tabs), Scanner (HUD panels, hero title), Browse
+  card tiles (hover lift not scale), Account, Admin (`.panel` tiles/tables, `.section-title`
+  headers), and the detail modal (raised surface + softer glow).
+- **User design feedback applied**: removed the "FAB / Flesh & Blood" header wordmark (looked
+  bad); made tabs align uniformly; unified the page background — dropped the flat
+  `bg-background` from Browse/Admin so every tab shows the same aura as the Scanner (preferred).
+
+### Still open / next
+- Phase 4 (trading): sell/trade lists + offers; NEEDS the valuation rule confirmed
+  ("trend price, or low if it's higher").
+- Productionize Phase 2: real magic-link email (swap `_deliver_magic_link`).
+- Leftover from Phase 1: careful removal of orphaned browser `/scan` dead code (keep
+  `/scan/native`'s easyocr+visual). Deep-link SPA fallback on the self-hosted app (Lovable ok).
+
+---
+
 ## 2026-07-04 — Phase 2 backend: email accounts (magic-link) + named cardlists
 
 Passwordless account system + server-side cardlists in the `app` schema. Email delivery
