@@ -24,6 +24,17 @@ sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.si
 - **gold** — `fab_dbt/models/gold/gold_cards.sql`. Thin, API-ready projection of silver
   (adds `is_foil`, `has_price`). The API only reads gold.
 
+## API layout (split 2026-07-05)
+`api.py` is thin wiring only (middleware, include_router, static mount) — still run as
+`python api.py` / `uvicorn api:app`. Endpoints live in `fab_api/routers/`
+(`cards`, `admin`, `scan`, `auth`, `cardlists`); shared env + the **pooled**
+`get_conn()` context manager (ThreadedConnectionPool, commits on exit, returns conn to
+the pool) in `fab_api/core.py`; the OCR/visual scan engine — moved **verbatim**, logic
+untouched — in `fab_api/scan_engine.py`. GZip middleware compresses `/cards` (~11×);
+`/sets` + `/stats` send Cache-Control. `app.*` is the only non-regenerable data:
+`backup_app.py` dumps it nightly (user cron, 03:30) to `backups/` (30 kept, gitignored);
+restore via `sudo docker compose exec -T db psql -U <user> -d fab < backups/app_<ts>.sql`.
+
 ## Data sources
 | Source | Gives | Notes |
 |---|---|---|
@@ -154,7 +165,8 @@ Latest verified post-cleanup shape (2026-06-28): `gold.gold_cards` has 17,256 ro
 
 ## Accounts + cardlists (Phase 2, DONE + live)
 Passwordless magic-link accounts + server-side named cardlists. Tables live in the `app`
-schema (`setup_db.py` is canonical; `api.py` self-migrates via `ensure_app_auth_schema`):
+schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
+`ensure_app_auth_schema`):
 `app.users`, `app.magic_tokens` (15-min TTL), `app.sessions` (30-day bearer token),
 `app.cardlists`, `app.cardlist_items` (UNIQUE(list, printing), qty).
 - **Auth**: `POST /auth/request-link` (mints token), `GET /auth/verify?token=` (→ session
@@ -184,9 +196,10 @@ makes tabs look inconsistent). The native app mirrors this via a `Theme` palette
   (1) pair the native app (download `/scanner-apk`, pair code via `/scan/session`, live sync
   via `/scan/records`), and (2) manual code entry via **`GET /scan/code?code=HVY050`**
   (`_parse_code`+`_snap_code`, typo-corrected). The native app is the primary scanner.
-- The old browser `POST /scan` (+ `/scan/debug`, `_ocr_claude`, `_ocr_google`) is now
-  orphaned — remove it carefully later; `/scan/native` still shares `_ocr_easyocr` (title)
-  and `_visual_match` (visual fallback), so don't delete those.
+- The old browser `POST /scan` (+ `/scan/debug`, `_ocr_claude`, `_ocr_google`) was
+  **removed 2026-07-05** in the router split. `/scan/native` keeps `_ocr_easyocr` (title)
+  and `_visual_match` (visual fallback) in `fab_api/scan_engine.py` — verified by
+  replaying a saved footer crop (identical result before/after the move).
 - Browser debug crops showed the footer strip was correctly framed but physically too soft
   for OCR, so footer OCR alone is not viable in browser video (why the native app won).
 - Backend has local `/scan/native` for Android/native submissions:

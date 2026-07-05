@@ -6,6 +6,59 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-05 — Foundation hardening: backups, API perf, router split, web polish
+
+Sanity-check session ("are we on the right track?") → verdict: pipeline + product are
+sound; fixed the four foundation gaps. All committed + pushed (fab `52d203f`, `3556741`;
+frontend `b8d438a` → Lovable rebuild). Tunnel→named-domain fix deliberately DEFERRED
+(user will evaluate alternatives).
+
+**1. Nightly app-schema backups (`backup_app.py` + cron).** `app.*` (users, cardlists,
+scan history) is the only non-regenerable data and had no backups. Script does a
+psycopg2 COPY-based logical dump (TRUNCATE + COPY + literal sequence setvals so it
+restores onto a fresh DB) to `backups/app_<ts>.sql`, keeps 30, atomic `.part` rename.
+User crontab: `30 3 * * * cd ~/Projects/fab && .venv/bin/python backup_app.py`.
+Gotcha hit: first crontab line lacked the `cd` (cron runs from $HOME) — fixed.
+Restore: `sudo docker compose exec -T db psql -U <user> -d fab < backups/app_<ts>.sql`.
+
+**2. API perf.** GZip middleware (`/cards?page_size=300`: 248 KB → 22 KB, ~11×);
+psycopg2 `ThreadedConnectionPool` (1–12) behind the SAME `get_conn()` context-manager
+shape so all 33 call sites were untouched (commits on clean exit, rolls back + drops
+broken conns on error); `Cache-Control` on `/sets` (1 h) and `/stats` (10 min).
+Pooled `/stats` ≈ 5–6 ms. Write paths verified end-to-end (auth + cardlist round-trip),
+test rows cleaned from the shared DB.
+
+**3. Router split + dead-code removal.** `api.py` (2 369 lines) → thin wiring +
+`fab_api/` package: `core.py` (env, pool, scan log), `scan_engine.py` (recognition,
+moved **verbatim** — scanner logic untouched per standing constraint), and
+`routers/{cards,admin,scan,auth,cardlists}.py`. Split done by line-range extraction
+script, not retyping. Removed the orphaned browser-scanner path: `POST /scan`,
+`POST /scan/debug`, `_ocr_claude`, `_ocr_google`, `ScanRequest`, Google/Anthropic key
+consts. KEPT `_rectify_card`/`_find_card_quad`/`_order_corners`/`_ocr_easyocr`/
+`_visual_match` — `/scan/native` uses them. Verified: 26 routes respond; replaying a
+saved footer crop through `/scan/native` gives the identical result
+(`AJV025` → Winter's Bite, 0.99); auth 401s correctly; dead endpoints gone.
+`start_fab.py` unchanged (`uvicorn api:app` still the entry).
+
+**4. Web polish (frontend `b8d438a`).** New locked-system primitives `.skeleton`
+(shimmer) + `.tile-in` (staggered entrance, reduced-motion safe). Index: skeleton grid
+on first load, compact hero (stats folded into the tagline line — was eating ~2× the
+viewport), staggered tiles. CardDetailModal: ←/→ keys + on-screen chevrons step through
+the browse order. `index.html`: real title/description/OG (Lovable boilerplate gone) +
+new cyan-F `favicon.svg`. Stagger note: `CardGroupItem` renders `display:contents`, so
+the animation class goes on the inner tile via an `index` prop (a wrapper div would
+break the `col-span-full` expanded panel).
+
+**Bash gotcha for future sessions:** `pkill -f "uvicorn api:app --port 8010"` inside a
+compound command kills the *current shell* (the pattern matches the shell's own command
+line, exit 144). Run pkill in its own Bash call, separate from the start command.
+
+**Still open:** tunnel → named tunnel + domain (deferred by user); real email sender
+(`_deliver_magic_link` swap); Phase 4 trading (valuation rule unconfirmed);
+off-machine copy of `backups/` would be nice (currently local-only).
+
+---
+
 ## 2026-07-04 — Phase 2 frontend + Phase 3 visual overhaul + scanner app revamp
 
 Everything below is committed + pushed (fab → GitHub GHT4ngo/fab; frontend →
