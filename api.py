@@ -14,10 +14,14 @@ import string
 from pathlib import Path
 from rapidfuzz import process, fuzz
 import requests as http_requests
+import threading
+from contextlib import contextmanager
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, Query, Header, Depends, HTTPException
+import psycopg2.pool
+from fastapi import FastAPI, Query, Header, Depends, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -81,14 +85,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress JSON responses — /cards with page_size=300 carries full rules text
+# for every row; gzip cuts that ~5-10× through the tunnel.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+
+# Connection pool — a fresh psycopg2.connect per request costs TCP+auth setup
+# on every call; the pool keeps warm connections. get_conn() stays a context
+# manager so all `with get_conn() as conn:` call sites are unchanged.
+_pg_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_pg_pool_lock = threading.Lock()
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pg_pool
+    if _pg_pool is None:
+        with _pg_pool_lock:
+            if _pg_pool is None:
+                _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1, maxconn=12,
+                    host=PG_HOST, port=PG_PORT,
+                    database="fab",
+                    user=PG_USER, password=PG_PASSWORD,
+                    cursor_factory=psycopg2.extras.RealDictCursor,
+                )
+    return _pg_pool
+
+
+@contextmanager
 def get_conn():
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT,
-        database="fab",
-        user=PG_USER, password=PG_PASSWORD,
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
+    pool = _get_pool()
+    conn = pool.getconn()
+    broken = False
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            broken = True   # connection itself is dead (e.g. postgres restarted)
+        raise
+    finally:
+        pool.putconn(conn, close=broken or conn.closed)
 
 
 APP_SCAN_SCHEMA_SQL = """
@@ -355,8 +394,10 @@ def get_cards(
 # ── /sets ─────────────────────────────────────────────────────────────────────
 
 @app.get("/sets")
-def get_sets():
+def get_sets(response: Response):
     """List all sets that have cards in gold_cards."""
+    # Changes at most once a day (after the pipeline) — let browsers cache it.
+    response.headers["Cache-Control"] = "public, max-age=3600"
     sql = """
         SELECT
             g.set_id,
@@ -381,8 +422,9 @@ def get_sets():
 # ── /stats ────────────────────────────────────────────────────────────────────
 
 @app.get("/stats")
-def get_stats():
+def get_stats(response: Response):
     """Overall price coverage and match tier breakdown."""
+    response.headers["Cache-Control"] = "public, max-age=600"
     sql = """
         SELECT
             COUNT(*)                                    as total_cards,

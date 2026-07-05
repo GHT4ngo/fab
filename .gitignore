@@ -4,6 +4,9 @@
 # Throwaway: download cache, backups, logs, local Postgres data
 tmp/
 
+# Nightly app-schema dumps (backup_app.py) — local safety net, not source
+backups/
+
 # Python
 .venv/
 __pycache__/
