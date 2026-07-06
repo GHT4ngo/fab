@@ -412,6 +412,39 @@ tcgcsv_missing_printings as (
         pr.fetched_at                               as tcg_fetched_at
     from tcgcsv_missing m
     left join bronze.tcgcsv_prices pr on pr.product_id = m.product_id
+),
+
+-- Cardmarket EUR for tcgcsv-sourced printings (added 2026-07-06): same anchored
+-- pick as tier 1 — all CM products sharing the bare name, closest EUR (in SEK) to
+-- this printing's USD anchor wins — including the same sanity guard (≥20× AND
+-- ≥50 SEK off → CM has no product for it; keep USD only). Anchor-less printings
+-- get no EUR: without a price to disambiguate same-named products across
+-- expansions, a bare-name guess is worse than no price.
+tcgcsv_cm_pool as (
+    select
+        'tcgcsv:' || mp.product_id || ':' || mp.sub_type       as printing_unique_id,
+        cp.idproduct,
+        cp.price_eur,
+        cp.price_eur * (select rate_value from eur_to_sek)     as eur_sek,
+        mp.price_usd * (select rate_value from usd_to_sek)     as usd_sek
+    from tcgcsv_missing_printings mp
+    join cm_products cp on cp.base_name = upper(trim(mp.name))
+    where mp.price_usd is not null
+      and cp.price_eur is not null
+),
+
+tcgcsv_cm_pick as (
+    select distinct on (printing_unique_id)
+        printing_unique_id, idproduct, price_eur, eur_sek, usd_sek
+    from tcgcsv_cm_pool
+    order by printing_unique_id, abs(eur_sek - usd_sek) asc, price_eur asc
+),
+
+tcgcsv_cm as (
+    select printing_unique_id, idproduct, price_eur
+    from tcgcsv_cm_pick
+    where not (greatest(eur_sek, usd_sek) / nullif(least(eur_sek, usd_sek), 0) >= 20
+               and abs(eur_sek - usd_sek) >= 50)
 )
 
 -- ── Final select ──────────────────────────────────────────────────────────────
@@ -523,18 +556,33 @@ select
     'https://tcgplayer-cdn.tcgplayer.com/product/'
         || mp.product_id || '_in_1000x1000.jpg'                as image_url,
     mp.product_id                                             as tcgplayer_product_id,
-    null::int                                                 as cm_idproduct,
+    tc.idproduct                                              as cm_idproduct,
     4                                                          as match_tier,
-    null::numeric                                             as price_eur,
+    tc.price_eur                                              as price_eur,
     mp.price_usd                                              as tcg_price_usd,
     mp.tcg_fetched_at                                         as tcg_fetched_at,
-    round(mp.price_usd * u.rate_value, 0)                     as price_sek,
-    null::numeric                                             as cm_low_eur,
-    round(mp.price_usd * u.rate_value, 0)                     as trade_value_sek,
+    -- Same CM-first basis as the main path: EUR when anchored-matched, else USD.
+    coalesce(
+        round(tc.price_eur * e.rate_value, 0),
+        round(mp.price_usd * u.rate_value, 0)
+    )                                                          as price_sek,
+    nullif(lp4.low, 0)                                        as cm_low_eur,
+    coalesce(
+        round(greatest(tc.price_eur, nullif(lp4.low, 0)) * e.rate_value, 0),
+        round(mp.price_usd * u.rate_value, 0)
+    )                                                          as trade_value_sek,
     e.rate_value                                             as eur_to_sek_rate,
     null::text                                                as cc_technique,
-    case when mp.price_usd is not null then 'tcgcsv_usd' end  as price_source,
-    case when mp.price_usd is not null then 'high'      end  as price_confidence
+    case
+        when tc.price_eur is not null then 'cardmarket_anchored'
+        when mp.price_usd is not null then 'tcgcsv_usd'
+    end                                                        as price_source,
+    case
+        when tc.price_eur is not null or mp.price_usd is not null then 'high'
+    end                                                        as price_confidence
 from tcgcsv_missing_printings mp
 cross join eur_to_sek e
 cross join usd_to_sek u
+left join tcgcsv_cm tc
+    on tc.printing_unique_id = 'tcgcsv:' || mp.product_id || ':' || mp.sub_type
+left join latest_prices lp4 on lp4.idproduct = tc.idproduct
