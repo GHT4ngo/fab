@@ -73,6 +73,15 @@ ENDPOINT_GIST_ID = os.getenv("ENDPOINT_GIST_ID", "84b51c1df1551685fb9b151f684d97
 CF_PIDFILE = HERE / "tmp" / "logs" / "cloudflared.pid"
 CF_LOGFILE = HERE / "tmp" / "logs" / "cloudflared.out"
 
+# Named tunnel (2026-07-06): with ~/.cloudflared/config.yml present (tunnel `fab`,
+# created via `cloudflared tunnel login` + `tunnel create fab` + `tunnel route dns`),
+# the public URL is PERMANENT — no more trycloudflare URL churn, Lovable resyncs, or
+# zombie-URL replacement. The quick-tunnel path below remains as a fallback if the
+# named config is ever missing.
+NAMED_TUNNEL      = os.getenv("NAMED_TUNNEL", "fab")
+NAMED_TUNNEL_URL  = os.getenv("NAMED_TUNNEL_URL", "https://fabmatrix.t4ngo.com")
+NAMED_TUNNEL_CONF = Path.home() / ".cloudflared" / "config.yml"
+
 GREEN, CYAN, YELLOW, RED, BOLD, RESET = (
     "\033[32m", "\033[36m", "\033[33m", "\033[31m", "\033[1m", "\033[0m"
 )
@@ -95,7 +104,10 @@ def _pid_alive(pid):
 
 
 def _find_cloudflared_tunnel_pid():
-    needle = f"cloudflared tunnel --url http://localhost:{API_PORT}"
+    needles = (
+        f"cloudflared tunnel --url http://localhost:{API_PORT}",  # quick tunnel
+        f"tunnel run {NAMED_TUNNEL}",                              # named tunnel
+    )
     try:
         proc = subprocess.run(
             ["pgrep", "-af", "cloudflared"],
@@ -106,7 +118,7 @@ def _find_cloudflared_tunnel_pid():
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     for line in proc.stdout.splitlines():
-        if needle in line and "--no-autoupdate" in line:
+        if any(n in line for n in needles):
             try:
                 return int(line.split(None, 1)[0])
             except (ValueError, IndexError):
@@ -156,9 +168,36 @@ def tunnel_status():
 
 def start_persistent_tunnel(cloudflared):
     """Spawn cloudflared DETACHED (survives this script + API restarts), wait for its
-    URL, and record pid + URL. Returns the URL, or None on failure."""
+    URL, and record pid + URL. Returns the URL, or None on failure.
+
+    Named-tunnel mode (config.yml present): runs `tunnel run <name>` and the URL is
+    the fixed NAMED_TUNNEL_URL — verified reachable before being accepted."""
     CF_LOGFILE.parent.mkdir(parents=True, exist_ok=True)
     logf = open(CF_LOGFILE, "w")
+
+    if NAMED_TUNNEL_CONF.exists():
+        proc = subprocess.Popen(
+            [cloudflared, "tunnel", "run", NAMED_TUNNEL],
+            stdout=logf, stderr=subprocess.STDOUT, cwd=HERE,
+            start_new_session=True,
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                print(f"  {RED}x{RESET}  Named tunnel died on start — see {CF_LOGFILE}")
+                return None
+            if tunnel_reachable(NAMED_TUNNEL_URL, timeout=4):
+                CF_PIDFILE.write_text(str(proc.pid))
+                URL_FILE.write_text(NAMED_TUNNEL_URL + "\n")
+                return NAMED_TUNNEL_URL
+            time.sleep(1)
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        print(f"  {RED}x{RESET}  Named tunnel never became reachable at {NAMED_TUNNEL_URL}")
+        return None
+
     proc = subprocess.Popen(
         [cloudflared, "tunnel", "--url", f"http://localhost:{API_PORT}", "--no-autoupdate"],
         stdout=logf, stderr=subprocess.STDOUT, cwd=HERE,
