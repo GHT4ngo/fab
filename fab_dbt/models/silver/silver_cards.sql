@@ -404,7 +404,11 @@ tcgcsv_missing_printings as (
     select
         m.*,
         coalesce(pr.sub_type, 'Normal')             as sub_type,
-        pr.market_price                             as price_usd,
+        -- market_price only exists where TCGplayer saw actual sales; low-volume
+        -- products (blitz-deck singles like 1HB/1HD History Pack decks) often have
+        -- only listings. Fall back to low_price — the cheapest real ask — rather
+        -- than leaving ~400 printings priceless.
+        coalesce(pr.market_price, pr.low_price)     as price_usd,
         pr.fetched_at                               as tcg_fetched_at
     from tcgcsv_missing m
     left join bronze.tcgcsv_prices pr on pr.product_id = m.product_id
