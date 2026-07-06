@@ -241,6 +241,7 @@ cm_heuristic_ranked as (
         c.foiling,
         c.idproduct,
         c.price_eur,
+        c.low,
         cc.cc_technique,
         count(*) over (partition by c.printing_unique_id)                  as products_for_card,
         row_number() over (partition by c.printing_unique_id
@@ -250,22 +251,28 @@ cm_heuristic_ranked as (
     left join cc on cc.printing_unique_id = c.printing_unique_id
 ),
 
+-- Low-volume products often have listings (low) but no computed trend. Price from
+-- trend, else the product's own low (still the EXACT matched product — better than
+-- the cross-expansion fallback average). A match with NEITHER is excluded so the
+-- printing cascades to tier 3 instead of sitting priceless — previously ~658
+-- printings were "matched" to a priceless product, which BLOCKED the fallback.
 cm_heuristic as (
     select distinct on (printing_unique_id)
         printing_unique_id,
         idproduct,
-        price_eur,
+        coalesce(price_eur, nullif(low, 0))         as price_eur,
         2                                           as match_tier,
         cc_technique
     from cm_heuristic_ranked
-    where (
+    where (price_eur is not null or nullif(low, 0) is not null)
+      and ((
         products_for_card = 2
         and ((foiling = 'S'  and price_rank = 1)
           or (foiling != 'S' and price_rank = 2))
     ) or (
         products_for_card = 1
         and (cc_technique is not null or cc_rows_for_card = 0)
-    )
+    ))
     order by printing_unique_id, price_rank
 ),
 
@@ -287,6 +294,7 @@ cm_fallback as (
         null::text                                  as cc_technique
     from printings p
     join cm_fallback_agg agg on agg.base_name = p.name_key
+    where agg.trend_eur is not null   -- a priceless tier-3 row would only block manual
 ),
 
 -- 5) MANUAL (LAST resort): the hand-built crosswalk, used only when nothing above
@@ -295,7 +303,7 @@ cm_manual as (
     select distinct on (p.printing_unique_id)
         p.printing_unique_id,
         m.idproduct,
-        nullif(pr.trend_eur, 0)                     as price_eur,
+        coalesce(nullif(pr.trend_eur, 0), nullif(pr.low, 0)) as price_eur,
         5                                           as match_tier,
         null::text                                  as cc_technique
     from bronze.fab_cm_manual m
