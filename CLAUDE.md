@@ -194,12 +194,13 @@ schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
 - **Cardlists CRUD**: `GET/POST /cardlists`, `GET/PATCH/DELETE /cardlists/{id}`,
   `POST /cardlists/{id}/items` (adds to qty on conflict), `PATCH`/`DELETE
   /cardlists/{id}/items/{printing}`. Ownership enforced everywhere (`_get_owned_cardlist`).
-- **EMAIL IS LIVE via Resend (2026-07-06)**: `RESEND_API_KEY` in `.env` → magic link is
-  emailed (`emailed: true`, token NOT in the response); without the key it falls back to
-  dev mode (`dev_link` returned). Links target the frontend (`/account?token=…`, consumed
-  by AuthProvider); `MAGIC_LINK_BASE` env can pin a stable base. **Free-tier limit: only
-  delivers to the Resend account owner's own address** — verify a domain in Resend to
-  email other users (same domain purchase as the named-tunnel fix).
+- **EMAIL IS LIVE via Resend, ANY recipient (2026-07-07)**: t4ngo.com is verified in
+  Resend; sender is `RESEND_FROM="FAB Matrix <noreply@t4ngo.com>"` (`.env` — value MUST
+  stay quoted: `run_pipeline.sh` sources `.env` as shell and an unquoted `<` aborts the
+  restart). `RESEND_API_KEY` set → magic link emailed (`emailed: true`, token NOT in the
+  response); without the key it falls back to dev mode (`dev_link` returned). Links
+  target the frontend (`/account?token=…`, consumed by AuthProvider). Verified: delivery
+  to a non-owner address works → real multi-user accounts/trading are unlocked.
 - Self-hosted frontend has an **SPA fallback** (`SpaStaticFiles` in `api.py`): unknown
   paths serve `index.html`, so deep links like the emailed magic link work on the tunnel.
 - Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.tsx`

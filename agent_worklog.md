@@ -17,8 +17,12 @@ config and runs the named tunnel (fixed NAMED_TUNNEL_URL, reachability-verified 
 start); quick-tunnel code kept as fallback. One-time sync: URL_FILE, endpoint gist, and
 frontend `.env` → the domain (final URL-driven Lovable rebuild ever). All routes verified
 200 on the domain, ~3-7× faster than trycloudflare (40-60 ms vs 150-340 ms).
-**Still to do on the domain:** verify it in Resend (DNS records) so magic links can be
-emailed to OTHER users → real multi-user trading.
+**Domain verified in Resend same day** → `RESEND_FROM="FAB Matrix <noreply@t4ngo.com>"`;
+delivery to a non-owner address verified end-to-end (`emailed: true` to
+christofer@alphaspel.se). Multi-user accounts + trading fully unlocked.
+GOTCHA: `.env` is sourced as SHELL by run_pipeline.sh — RESEND_FROM must be quoted
+(unquoted `<` = syntax error that silently aborts `--restart`, leaving the old API
+process running with stale env; diagnosed via process start-time vs .env mtime).
 
 ---
 
