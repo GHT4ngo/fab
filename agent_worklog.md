@@ -6,6 +6,30 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-06 (night) — Phase 4: trading platform (valuation, listings, offers)
+
+User confirmed the valuation rule → built the whole Phase 4 slice, live end-to-end
+(fab `0ee2d95`/`edd7945`, frontend `00af24b`).
+
+- **Valuation:** `gold.trade_value_sek` = greatest(CM trend, CM low) EUR→SEK, tcgcsv
+  USD fallback; `cm_low_eur` surfaced from `latest_prices` via `bm.idproduct` join.
+  17,014 valued; 1,047 bumped by low>trend; 0 below trend. 13 dbt tests pass.
+- **Backend (`fab_api/routers/trade.py`):** `is_trade_list` flag on cardlists (PATCH
+  handles name and/or flag), public `GET /trade/listings` (q/set search, owner email,
+  value), offers with per-unit value snapshots at send time, accept/decline/cancel with
+  role enforcement (recipient vs sender) + pending-only 409 guard. Accepting only
+  records the deal — in-person swap, no inventory movement (deliberate).
+- **Frontend `/trade` (Trading Post):** listings table, offer builder (chips to add
+  from their trade list / your own cardlists, per-side totals + balance line, message),
+  offers inbox with status chips + actions. Account: Trade?/Trading toggle + TRADE chip.
+- Verified with two temp users: listing browse → offer 78 kr vs 443 kr → 403
+  sender-accept → accept → 409 re-accept. Test users cleaned (cascade removes offers).
+- NOT built yet (deliberate): offer notifications (email on incoming offer), Swish
+  deep-link/IOU settlement from the roadmap, listing pagination server keys beyond 200
+  offers, trade history view beyond the flat inbox.
+
+---
+
 ## 2026-07-06 (evening) — Real email via Resend + scanner UI polish + SPA fallback
 
 **Email live (`d1a629c` + frontend `df3e647`):** `_deliver_magic_link` now sends styled

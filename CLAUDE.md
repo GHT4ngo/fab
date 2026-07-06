@@ -191,6 +191,22 @@ schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
 - Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.tsx`
   (AuthProvider), `src/pages/Account.tsx`, `AddToListButton`, `SaveScanToListButton`.
 
+## Trading (Phase 4, DONE + live 2026-07-06)
+- **Valuation rule (user-confirmed): `gold.trade_value_sek` = greatest(CM trend, CM low)
+  EUR→SEK, tcgcsv USD→SEK fallback** ("trend price, or low if it's higher").
+  `gold.cm_low_eur` also exposed. Computed in silver's final select.
+- A cardlist with `app.cardlists.is_trade_list = true` is a public trade list
+  (toggle on Account; `PATCH /cardlists/{id}` takes `name` and/or `is_trade_list`).
+- `fab_api/routers/trade.py`: `GET /trade/listings` (public marketplace browse),
+  `POST /trade/offers` (give/want bundles, per-unit `value_sek` snapshotted at send
+  time), `GET /trade/offers` (mine, both directions), `PATCH /trade/offers/{id}`
+  (accept/decline = recipient only, cancel = sender only, pending-only else 409).
+  Accepting records the deal — the swap happens in person; no inventory moves.
+- Tables: `app.trade_offers`, `app.trade_offer_items` (setup_db.py canonical;
+  trade router self-migrates, incl. the `is_trade_list` ALTER).
+- Frontend `/trade` (Trading Post): listings table + search, offer builder (request
+  from their list / give from your cardlists, running totals + balance), offers inbox.
+
 ## Frontend design system (Phase 3, locked)
 `retro-data-display/src/index.css` is the **locked** system (Neurotech/Netrunner: deep
 blue-black, cyan primary, magenta accent, Orbitron + Share Tech Mono). Reusable primitives —
