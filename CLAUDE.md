@@ -62,7 +62,12 @@ per printing drives how Cardmarket EUR is matched. Matching is on the **bare car
    deliberately untouched — those are genuine EU/US market gaps.
 2. auto — `fab_expansions` + Cardmarket by (idExpansion, base_name) + foil heuristic (no anchor)
 3. fallback — bare-name aggregation across expansions
-4. missing-set card sourced from **tcgcsv** (set absent from the-fab-cube)
+4. missing-set card sourced from **tcgcsv** (set absent from the-fab-cube). Since
+   2026-07-06 tier-4 rows ALSO get an anchored Cardmarket EUR match (`tcgcsv_cm` CTEs —
+   same bare-name pool + closest-to-anchor pick + ≥20×/≥50-SEK guard as tier 1); USD
+   falls back `market_price → low_price` (TCGplayer has no market price for low-volume
+   deck singles like 1HB/1HD History Pack blitz decks). Anchor-less printings stay
+   EUR-less on purpose. `price_source` shows `cardmarket_anchored` when EUR matched.
 5. **manual** — `fab_cm_manual` crosswalk, **LAST resort** (least trusted; ~12 rows now)
 - `null` — no price matched
 

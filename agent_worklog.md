@@ -6,6 +6,25 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-07 — History Pack blitz decks priced; tier-4 gets EUR (`967d05b`, `e3f8858`)
+
+User asked why the Bravo/Dash blitz decks (sets 1HB/1HD, tcgcsv-sourced tier 4) had no
+prices. Two-layer root cause, both fixed:
+1. **USD:** TCGplayer only computes `market_price` from actual sales — low-volume deck
+   singles only have listings. Tier-4 now falls back `market_price → low_price`.
+   +400 printings priced, coverage 92.8% → 95.1%.
+2. **EUR:** tier-4 rows never entered CM matching AT ALL (structural: separate union
+   branch). Added `tcgcsv_cm` CTEs reusing the tier-1 anchored mechanics (bare-name
+   pool, closest-to-USD-anchor, ≥20×/≥50-SEK sanity guard). 1,300/1,575 tier-4 rows now
+   carry Cardmarket EUR + the CM-first SEK basis; `price_source='cardmarket_anchored'`
+   with match_tier still 4 (tier = card provenance, source = price provenance).
+   Anchor-less printings (3 in 1HD) deliberately stay unpriced — bare-name guessing
+   across expansions without an anchor is worse than no price.
+Result: 1HB 27/27 fully priced (EUR+USD), 1HD 25/28. 13 dbt tests pass. No API restart
+needed (gold is read live).
+
+---
+
 ## 2026-07-06 (night) — Phase 4: trading platform (valuation, listings, offers)
 
 User confirmed the valuation rule → built the whole Phase 4 slice, live end-to-end
