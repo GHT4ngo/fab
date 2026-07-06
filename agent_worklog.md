@@ -6,6 +6,28 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-06 (later) — Gap-tool search/cardlist filters + anchored-match sanity guard
+
+**Tools search (fab `tbd`, frontend `127feae`):** `/tools/price-gap` gained `q` (name
+ILIKE) and `cardlist_id` (+optional bearer auth — `_current_user` called directly, list
+ownership enforced, 404 for someone else's list). UI: debounced search box + a Cardlist
+dropdown (signed-in only) that restricts the table to one of your lists.
+
+**HNT055 Cindra mismatch → silver guard (`5f9f617`):** user spotted the Cindra token
+priced 63 SEK. Root cause: CM has NO product for the plain HNT055 token ($0.08); bare-name
+"Cindra" candidates were the CIN armory-deck hero (€5.72, exp 6049) and the HNT Marvel
+(€30.11) — anchored picked the least-bad wrong one. Fix in `silver_cards.sql`:
+`cm_anchor_rejected` — if even the CLOSEST candidate is ≥20× off the anchor AND ≥50 SEK
+apart, the printing skips tiers 1-3 (heuristic/fallback draw from the same wrong pool)
+and falls to tcgcsv USD; manual tier-5 still overrides. 18 rows changed: 5 → manual
+(WTR080/ARC005 land on their hand-mapped cold-foil products), 13 → tcgcsv_usd (Ash
+UPR043, Eloquence FAB154, …). Coverage unchanged (16,560), 13 dbt tests pass. Bounds are
+deliberately extreme: the 3-20× band (~70 rows) is documented genuine EU/US market gaps
+and keeps the CM-first basis. Verified in the gap tool: the token row disappears (no
+longer dual-priced), remaining Cindra rows sane.
+
+---
+
 ## 2026-07-06 — Tools tab: price-gap explorer
 
 New web tab (fab `1e32fac`, frontend `f5b5c29`, both pushed; API restarted, same tunnel

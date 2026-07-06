@@ -55,6 +55,11 @@ per printing drives how Cardmarket EUR is matched. Matching is on the **bare car
 1. **anchored** — Cardmarket product picked by closest EUR (in SEK) to the tcgcsv USD
    anchor, from ALL products sharing the bare name (no expansion constraint). The anchor
    price + the card id/number separate same-named cards (e.g. promo alt-arts).
+   **Sanity guard (2026-07-06):** if even the closest candidate is ≥20× off the anchor
+   AND ≥50 SEK apart, CM has no product for that printing (e.g. HNT055 Cindra token
+   $0.08 vs the €5.72 armory-deck hero) → the printing skips tiers 1-3 entirely and
+   falls to the tcgcsv USD price (manual tier-5 still overrides). The 3-20× band is
+   deliberately untouched — those are genuine EU/US market gaps.
 2. auto — `fab_expansions` + Cardmarket by (idExpansion, base_name) + foil heuristic (no anchor)
 3. fallback — bare-name aggregation across expansions
 4. missing-set card sourced from **tcgcsv** (set absent from the-fab-cube)

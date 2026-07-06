@@ -5,9 +5,10 @@ behind the web Tools tab. /tools/classes feeds its class/talent filter."""
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Response
 
 from fab_api.core import get_conn
+from fab_api.routers.auth import _current_user
 
 router = APIRouter()
 
@@ -65,6 +66,8 @@ def tools_classes(response: Response):
 def tools_price_gap(
     direction: str = Query("any", description="'usd' = USD pricier, 'eur' = EUR pricier, 'any'"),
     min_pct:   float = Query(0, ge=0, description="Minimum gap: pricier side ≥ this % above the cheaper"),
+    q:         Optional[str] = Query(None, description="Card name search"),
+    cardlist_id: Optional[int] = Query(None, description="Restrict to this cardlist (requires auth)"),
     rarity:    Optional[str] = Query(None),
     set_id:    Optional[str] = Query(None),
     card_class: Optional[str] = Query(None, description="Class/talent word matched in type_text"),
@@ -73,6 +76,7 @@ def tools_price_gap(
     sort_dir:  str = Query("desc"),
     page:      int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
+    authorization: Optional[str] = Header(None),
 ):
     """Cards priced on BOTH markets whose EUR and USD prices (normalised to SEK)
     diverge. Rows without both prices are excluded by definition. diff_* is signed
@@ -80,6 +84,25 @@ def tools_price_gap(
     where = ["g.price_eur > 0", "g.tcg_price_usd > 0"]
     params: list = []
 
+    if q and q.strip():
+        where.append("g.name ILIKE %s")
+        params.append(f"%{q.strip()}%")
+    if cardlist_id is not None:
+        # Cardlists are private — resolve the bearer token and enforce ownership.
+        user = _current_user(authorization)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM app.cardlists WHERE cardlist_id = %s AND user_id = %s",
+                    [cardlist_id, user["user_id"]],
+                )
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Cardlist not found")
+        where.append(
+            "g.printing_unique_id IN "
+            "(SELECT printing_unique_id FROM app.cardlist_items WHERE cardlist_id = %s)"
+        )
+        params.append(cardlist_id)
     if rarity:
         where.append("g.rarity = %s")
         params.append(rarity.upper())
