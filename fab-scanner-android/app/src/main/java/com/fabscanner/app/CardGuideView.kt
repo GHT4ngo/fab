@@ -32,6 +32,13 @@ class CardGuideView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeWidth = 3f
     }
+    private val footerLabel = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = cyan
+        textSize = 26f
+        letterSpacing = 0.25f
+        isFakeBoldText = true
+        textAlign = Paint.Align.CENTER
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -73,5 +80,8 @@ class CardGuideView(context: Context) : View(context) {
         )
         canvas.drawRoundRect(footer, 8f, 8f, footerFill)
         canvas.drawRoundRect(footer, 8f, 8f, footerStroke)
+        // Label above the strip so the instructions ("code in the cyan strip")
+        // point at something visibly named. Purely visual — no capture change.
+        canvas.drawText("CODE", footer.centerX(), footer.top - 12f, footerLabel)
     }
 }

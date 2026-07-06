@@ -148,12 +148,19 @@ class MainActivity : ComponentActivity() {
         val guide = CardGuideView(this)
         root.addView(guide, FrameLayout.LayoutParams(-1, -1))
 
-        // ── Top header: glowing FAB SCANNER wordmark ──────────────────────────
+        // ── Top block: FAB SCANNER wordmark + code-scan instructions ─────────
+        // Header gets status-bar inset padding so the wordmark sits below the
+        // system icons instead of behind them.
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), dp(14), dp(18), dp(14))
+            setPadding(dp(18), dp(10), dp(18), dp(8))
             setBackgroundColor(Theme.HEADER)
+        }
+        header.setOnApplyWindowInsetsListener { v, insets ->
+            @Suppress("DEPRECATION")
+            v.setPadding(dp(18), dp(10) + insets.systemWindowInsetTop, dp(18), dp(8))
+            insets
         }
         header.addView(TextView(this).apply {
             text = "FAB"
@@ -172,12 +179,43 @@ class MainActivity : ComponentActivity() {
             letterSpacing = 0.28f
             setPadding(dp(8), dp(3), 0, 0)
         })
-        root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+
+        // Instruction box directly under the header — explains that the scanner
+        // reads the card's printed code and how to line the card up.
+        val instructions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadii = floatArrayOf(0f, 0f, 0f, 0f, dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat())
+                setColor(Theme.PANEL)
+                setStroke(dp(1), Theme.CYAN_DIM)
+            }
+        }
+        instructions.addView(TextView(this).apply {
+            text = "READS THE CARD CODE"
+            setTextColor(Theme.CYAN)
+            textSize = 11f
+            letterSpacing = 0.18f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        instructions.addView(TextView(this).apply {
+            text = "Fit the card inside the frame. The code (e.g. HNT055) goes in the cyan strip at the bottom. Hold steady."
+            setTextColor(Theme.MUTED)
+            textSize = 11f
+            setPadding(0, dp(3), 0, 0)
+        })
+
+        val topBlock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        topBlock.addView(header, LinearLayout.LayoutParams(-1, -2))
+        topBlock.addView(instructions, LinearLayout.LayoutParams(-1, -2))
+        root.addView(topBlock, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
         // ── Bottom control panel ─────────────────────────────────────────────
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(18))
+            // Compact: the shorter the panel, the more breathing room above it
+            // between the card guide and the buttons.
+            setPadding(dp(18), dp(12), dp(18), dp(14))
             background = GradientDrawable().apply {
                 cornerRadii = floatArrayOf(dp(20).toFloat(), dp(20).toFloat(), dp(20).toFloat(), dp(20).toFloat(), 0f, 0f, 0f, 0f)
                 setColor(Theme.PANEL)
@@ -192,10 +230,12 @@ class MainActivity : ComponentActivity() {
             letterSpacing = 0.04f
         }
         debug = TextView(this).apply {
-            text = lastCrashSummary() ?: "Enter the pair code from the web scanner."
+            text = lastCrashSummary()
+                ?: if (sessionCode.isBlank()) "Enter the pair code from the web scanner."
+                   else "Pass cards through the guide."
             setTextColor(Theme.MUTED)
             textSize = 12f
-            setPadding(0, dp(4), 0, dp(10))
+            setPadding(0, dp(4), 0, dp(8))
         }
         apiInput = EditText(this).apply {
             hint = "API URL"
@@ -225,7 +265,12 @@ class MainActivity : ComponentActivity() {
             }
         }, LinearLayout.LayoutParams(-2, -1).apply { leftMargin = dp(8) })
 
-        val sessionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        // Pairing lives on the main panel only until a code is saved; once paired
+        // it tucks away under Advanced (where it can still be changed).
+        val sessionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = if (sessionCode.isBlank()) View.VISIBLE else View.GONE
+        }
         sessionRow.addView(sessionInput, LinearLayout.LayoutParams(0, -2, 1f))
         sessionRow.addView(cyberButton("Pair").apply {
             setOnClickListener {
@@ -237,6 +282,7 @@ class MainActivity : ComponentActivity() {
                     .apply()
                 status.text = if (sessionCode.isBlank()) "Enter pair code" else "Ready to scan"
                 debug.text = if (sessionCode.isBlank()) "Open the web scanner and tap Pair phone." else "Pass cards through the guide."
+                if (sessionCode.isNotBlank() && !showAdvanced) sessionRow.visibility = View.GONE
             }
         }, LinearLayout.LayoutParams(-2, -1).apply { leftMargin = dp(8) })
 
@@ -254,7 +300,7 @@ class MainActivity : ComponentActivity() {
             }
         })
         rowButton(cyberButton("Refocus").apply { setOnClickListener { focusAtCenter() } })
-        rowButton(cyberButton("Torch").apply {
+        rowButton(cyberButton("Light").apply {
             setOnClickListener {
                 torchOn = !torchOn
                 camera?.cameraControl?.enableTorch(torchOn)
@@ -264,6 +310,9 @@ class MainActivity : ComponentActivity() {
             setOnClickListener {
                 showAdvanced = !showAdvanced
                 apiRow.visibility = if (showAdvanced) View.VISIBLE else View.GONE
+                // Advanced also re-surfaces the pair row once a code is saved.
+                sessionRow.visibility =
+                    if (showAdvanced || sessionCode.isBlank()) View.VISIBLE else View.GONE
                 debug.text = if (showAdvanced) apiBase else "Pass cards through the guide."
             }
         })
