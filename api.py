@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from fab_api.core import HERE
 from fab_api.routers import admin, auth, cardlists, cards, scan, tools
@@ -39,9 +40,29 @@ app.include_router(tools.router)
 # Mounted last so it only catches paths not handled by an API route above.
 # Same-origin means the frontend uses relative URLs (VITE_API_BASE_URL=""),
 # so the public tunnel URL can change without ever rebuilding the frontend.
+
+
+class SpaStaticFiles(StaticFiles):
+    """StaticFiles with SPA fallback: unknown paths (React Router routes like
+    /account or /tools — e.g. the emailed magic link) serve index.html instead
+    of 404. Only paths NOT matched by an API route ever reach this mount, so
+    API 404s stay JSON."""
+
+    async def get_response(self, path: str, scope):
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as e:
+            if e.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+        if response.status_code == 404:
+            response = await super().get_response("index.html", scope)
+        return response
+
+
 _FRONTEND_DIST = HERE / "retro-data-display" / "dist"
 if _FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")
+    app.mount("/", SpaStaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")
 
 
 if __name__ == "__main__":
