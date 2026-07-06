@@ -180,8 +180,14 @@ schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
 - **Cardlists CRUD**: `GET/POST /cardlists`, `GET/PATCH/DELETE /cardlists/{id}`,
   `POST /cardlists/{id}/items` (adds to qty on conflict), `PATCH`/`DELETE
   /cardlists/{id}/items/{printing}`. Ownership enforced everywhere (`_get_owned_cardlist`).
-- **EMAIL IS DEV-MODE**: the magic link is returned in the response (`dev_link`) + logged,
-  NOT emailed. Swap `_deliver_magic_link()` for a real sender (Resend/SMTP) to go live.
+- **EMAIL IS LIVE via Resend (2026-07-06)**: `RESEND_API_KEY` in `.env` → magic link is
+  emailed (`emailed: true`, token NOT in the response); without the key it falls back to
+  dev mode (`dev_link` returned). Links target the frontend (`/account?token=…`, consumed
+  by AuthProvider); `MAGIC_LINK_BASE` env can pin a stable base. **Free-tier limit: only
+  delivers to the Resend account owner's own address** — verify a domain in Resend to
+  email other users (same domain purchase as the named-tunnel fix).
+- Self-hosted frontend has an **SPA fallback** (`SpaStaticFiles` in `api.py`): unknown
+  paths serve `index.html`, so deep links like the emailed magic link work on the tunnel.
 - Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.tsx`
   (AuthProvider), `src/pages/Account.tsx`, `AddToListButton`, `SaveScanToListButton`.
 

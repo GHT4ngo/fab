@@ -6,6 +6,30 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-06 (evening) — Real email via Resend + scanner UI polish + SPA fallback
+
+**Email live (`d1a629c` + frontend `df3e647`):** `_deliver_magic_link` now sends styled
+HTML via api.resend.com when `RESEND_API_KEY` is set (10s timeout, logged, graceful
+fallback to dev link on any failure). Magic links now target the FRONTEND
+(`/account?token=…`) instead of the raw API verify endpoint; `dev_link` only returned
+when no email was sent (no token leak). Frontend: `devLogin` returns null on real-email
+mode → "Sign-in link sent — check your email" toast. User created a Resend account
+(gmail signup), key in `.env` — verified delivered + signed in for real.
+GOTCHA: free tier without a verified domain only delivers to the account owner's own
+address; domain verification (same purchase as named tunnel) unlocks other users.
+
+**SPA fallback (`10a0186`):** the emailed link 404'd — StaticFiles didn't know
+`/account`. `SpaStaticFiles` in api.py serves index.html for unknown paths (API 404s
+unaffected — only unmatched paths reach the mount). Closes the long-standing
+"deep-link on self-hosted" open item.
+
+**Scanner app UI (`4de96dd`):** header inset below status bar, instruction box
+("READS THE CARD CODE" + align hint) flush under header, CODE label over the footer
+strip (guide geometry/crops untouched), pair row hidden once paired (Advanced
+re-surfaces it), Torch→Light, compact panel. Verified on device via adb screenshots.
+
+---
+
 ## 2026-07-06 (later) — Gap-tool search/cardlist filters + anchored-match sanity guard
 
 **Tools search (fab `tbd`, frontend `127feae`):** `/tools/price-gap` gained `q` (name
