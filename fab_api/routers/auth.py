@@ -182,7 +182,7 @@ def _current_user(authorization: Optional[str] = Header(None)) -> dict:
 def _get_owned_cardlist(cur, user_id: int, cardlist_id: int) -> dict:
     """Fetch a cardlist owned by user_id, or raise 404. Enforces ownership everywhere."""
     cur.execute(
-        "SELECT cardlist_id, user_id, name, created_at, updated_at "
+        "SELECT cardlist_id, user_id, name, is_trade_list, created_at, updated_at "
         "FROM app.cardlists WHERE cardlist_id = %s AND user_id = %s",
         [cardlist_id, user_id],
     )

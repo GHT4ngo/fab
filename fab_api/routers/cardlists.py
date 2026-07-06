@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from fab_api.core import get_conn
 from fab_api.routers.auth import _current_user, _get_owned_cardlist
+from fab_api.routers.trade import ensure_app_trade_schema
 
 router = APIRouter()
 
@@ -14,8 +15,9 @@ class CardlistCreate(BaseModel):
     name: str
 
 
-class CardlistRename(BaseModel):
-    name: str
+class CardlistUpdate(BaseModel):
+    name: str | None = None
+    is_trade_list: bool | None = None
 
 
 class CardlistItemAdd(BaseModel):
@@ -31,12 +33,13 @@ class CardlistItemQty(BaseModel):
 @router.get("/cardlists")
 def cardlists_list(user: dict = Depends(_current_user)):
     """All of the current user's cardlists with item count + total SEK value."""
+    ensure_app_trade_schema()
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT
-                    l.cardlist_id, l.name, l.created_at, l.updated_at,
+                    l.cardlist_id, l.name, l.is_trade_list, l.created_at, l.updated_at,
                     COALESCE(SUM(i.qty), 0)                        AS item_count,
                     COALESCE(SUM(i.qty * COALESCE(g.price_sek, 0)), 0) AS total_sek
                 FROM app.cardlists l
@@ -52,6 +55,7 @@ def cardlists_list(user: dict = Depends(_current_user)):
     return [{
         "cardlist_id": r["cardlist_id"],
         "name": r["name"],
+        "is_trade_list": r["is_trade_list"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
         "item_count": int(r["item_count"]),
@@ -124,6 +128,7 @@ def cardlists_get(cardlist_id: int, user: dict = Depends(_current_user)):
     return {
         "cardlist_id": lst["cardlist_id"],
         "name": lst["name"],
+        "is_trade_list": lst.get("is_trade_list", False),
         "created_at": lst["created_at"].isoformat() if lst["created_at"] else None,
         "updated_at": lst["updated_at"].isoformat() if lst["updated_at"] else None,
         "item_count": sum(i["qty"] for i in out_items),
@@ -133,19 +138,34 @@ def cardlists_get(cardlist_id: int, user: dict = Depends(_current_user)):
 
 
 @router.patch("/cardlists/{cardlist_id}")
-def cardlists_rename(cardlist_id: int, req: CardlistRename, user: dict = Depends(_current_user)):
-    """Rename a cardlist."""
-    name = (req.name or "").strip()[:120]
-    if not name:
+def cardlists_update(cardlist_id: int, req: CardlistUpdate, user: dict = Depends(_current_user)):
+    """Rename a cardlist and/or flip its trade-list flag (Phase 4: a trade-flagged
+    list's items show up in the public /trade/listings marketplace)."""
+    ensure_app_trade_schema()
+    name = (req.name or "").strip()[:120] if req.name is not None else None
+    if req.name is not None and not name:
         return JSONResponse(status_code=400, content={"error": "Name is required"})
+    if name is None and req.is_trade_list is None:
+        return JSONResponse(status_code=400, content={"error": "Nothing to update"})
     with get_conn() as conn:
         with conn.cursor() as cur:
             _get_owned_cardlist(cur, user["user_id"], cardlist_id)
+            if name is not None:
+                cur.execute(
+                    "UPDATE app.cardlists SET name = %s, updated_at = NOW() WHERE cardlist_id = %s",
+                    [name, cardlist_id],
+                )
+            if req.is_trade_list is not None:
+                cur.execute(
+                    "UPDATE app.cardlists SET is_trade_list = %s, updated_at = NOW() WHERE cardlist_id = %s",
+                    [req.is_trade_list, cardlist_id],
+                )
             cur.execute(
-                "UPDATE app.cardlists SET name = %s, updated_at = NOW() WHERE cardlist_id = %s",
-                [name, cardlist_id],
+                "SELECT cardlist_id, name, is_trade_list FROM app.cardlists WHERE cardlist_id = %s",
+                [cardlist_id],
             )
-    return {"cardlist_id": cardlist_id, "name": name}
+            r = dict(cur.fetchone())
+    return r
 
 
 @router.delete("/cardlists/{cardlist_id}")

@@ -333,6 +333,35 @@ CREATE TABLE IF NOT EXISTS app.cardlist_items (
     UNIQUE (cardlist_id, printing_unique_id)
 );
 CREATE INDEX IF NOT EXISTS cardlist_items_list ON app.cardlist_items (cardlist_id);
+
+-- ── App: Phase 4 trading — trade-flagged lists + offers ──────────────────────
+-- A cardlist with is_trade_list = true is publicly browsable via /trade/listings.
+-- Offers hold give/want item bundles; value_sek snapshots gold.trade_value_sek
+-- ("trend, or low if higher") at send time. Accepting records the deal only —
+-- the physical swap happens in person.
+ALTER TABLE app.cardlists ADD COLUMN IF NOT EXISTS is_trade_list BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS app.trade_offers (
+    offer_id     BIGSERIAL   PRIMARY KEY,
+    from_user_id BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    to_user_id   BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    status       TEXT        NOT NULL DEFAULT 'pending',
+    message      TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS trade_offers_to   ON app.trade_offers (to_user_id, status);
+CREATE INDEX IF NOT EXISTS trade_offers_from ON app.trade_offers (from_user_id, status);
+
+CREATE TABLE IF NOT EXISTS app.trade_offer_items (
+    item_id            BIGSERIAL PRIMARY KEY,
+    offer_id           BIGINT    NOT NULL REFERENCES app.trade_offers(offer_id) ON DELETE CASCADE,
+    side               TEXT      NOT NULL,
+    printing_unique_id TEXT      NOT NULL,
+    qty                INTEGER   NOT NULL DEFAULT 1,
+    value_sek          NUMERIC,
+    UNIQUE (offer_id, side, printing_unique_id)
+);
 """
 
 
@@ -398,6 +427,7 @@ def main():
     ok("app.scanned_cards / scan_sessions")
     ok("app.users / magic_tokens / sessions")
     ok("app.cardlists / cardlist_items")
+    ok("app.trade_offers / trade_offer_items")
     ok("extension: pg_trgm")
     cur.close()
     conn.close()
