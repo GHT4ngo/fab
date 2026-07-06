@@ -6,6 +6,22 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-07 — PERMANENT DOMAIN: fabmatrix.t4ngo.com (tunnel thorn dead) (`4c204b8`)
+
+User bought **t4ngo.com** at Cloudflare Registrar (checkout initially failed — blocked
+3-D Secure popup; allowing popups fixed it). Named tunnel setup:
+`cloudflared tunnel login` (first attempt hit transient "Failed to fetch resource" —
+retry worked) → `tunnel create fab` → `tunnel route dns fab fabmatrix.t4ngo.com` →
+`~/.cloudflared/config.yml` (ingress → :8001). `start_fab.py` now auto-detects the
+config and runs the named tunnel (fixed NAMED_TUNNEL_URL, reachability-verified on
+start); quick-tunnel code kept as fallback. One-time sync: URL_FILE, endpoint gist, and
+frontend `.env` → the domain (final URL-driven Lovable rebuild ever). All routes verified
+200 on the domain, ~3-7× faster than trycloudflare (40-60 ms vs 150-340 ms).
+**Still to do on the domain:** verify it in Resend (DNS records) so magic links can be
+emailed to OTHER users → real multi-user trading.
+
+---
+
 ## 2026-07-07 — History Pack blitz decks priced; tier-4 gets EUR (`967d05b`, `e3f8858`)
 
 User asked why the Bravo/Dash blitz decks (sets 1HB/1HD, tcgcsv-sourced tier 4) had no

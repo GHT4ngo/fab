@@ -141,6 +141,15 @@ sudo docker compose up -d db          # docker needs sudo here (non-interactive 
 - `--full` force the pipeline; `--no-serve` pipeline only; `--new-tunnel` fresh URL;
   `--stop` kill the tunnel; `--sync-lovable` / `--no-sync-lovable`; `--help`.
 
+**PERMANENT URL (2026-07-06): `https://fabmatrix.t4ngo.com`** — a **named** Cloudflare
+tunnel (`fab`) on the user's own domain t4ngo.com (bought at Cloudflare Registrar).
+`~/.cloudflared/config.yml` routes it to :8001; `start_fab.py` auto-detects the config
+and runs `cloudflared tunnel run fab`. The URL never changes → no Lovable resyncs, no
+gist churn, no zombie-URL replacement (that machinery remains as fallback if the config
+is ever missing). Frontend `.env` + endpoint gist point at the domain permanently.
+Also ~3-7× lower latency than trycloudflare. The paragraph below describes the legacy
+quick-tunnel behaviour, now only the fallback path:
+
 The Cloudflare tunnel is now **persistent**: `start_fab.py` runs cloudflared detached
 (pidfile `tmp/logs/cloudflared.pid`) so it **survives API restarts** → the URL stays put and
 Lovable is **not** rebuilt on every restart. **Reuse is gated on an actual HTTP reachability
