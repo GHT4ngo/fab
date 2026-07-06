@@ -9,8 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from fab_api.core import get_conn
-from fab_api.routers.auth import _current_user
+from fab_api.core import get_conn, send_email_async
+from fab_api.routers.auth import _current_user, _public_base_url
 
 router = APIRouter()
 
@@ -194,6 +194,65 @@ _OFFER_BASE_SQL = """
 """
 
 
+def _kr(v) -> str:
+    return f"{int(round(float(v))):,} kr".replace(",", " ") if v is not None else "—"
+
+
+def _offer_items_html(offer: dict, viewer: str) -> str:
+    """Two item lists as simple HTML, labelled from the email recipient's side.
+    viewer='recipient' → the offer's 'offer' side is what THEY receive."""
+    recv_label, give_label = (
+        ("You receive", "You give") if viewer == "recipient" else ("You give", "You receive")
+    )
+    recv = [i for i in offer["items"] if i["side"] == "offer"]
+    give = [i for i in offer["items"] if i["side"] == "request"]
+
+    def rows(items):
+        if not items:
+            return "<li style='color:#888'>nothing</li>"
+        return "".join(
+            f"<li>{i['name']} ×{i['qty']} — {_kr((i['value_sek'] or 0) * i['qty'])}</li>"
+            for i in items
+        )
+
+    return (
+        f"<p><b>{recv_label}</b> ({_kr(offer['offer_total_sek'])}):</p><ul>{rows(recv)}</ul>"
+        f"<p><b>{give_label}</b> ({_kr(offer['request_total_sek'])}):</p><ul>{rows(give)}</ul>"
+    )
+
+
+def _notify_offer(offer: dict, event: str) -> None:
+    """Email the party who should hear about `event` ('created' → recipient,
+    'accepted'/'declined' → sender). Async + best-effort: never blocks or fails
+    the API call. Cancel is deliberately silent (noise)."""
+    base = _public_base_url() or "https://fabmatrix.t4ngo.com"
+    link = f"{base}/trade"
+    if event == "created":
+        to, subject = offer["to_email"], f"New trade offer from {offer['from_email']}"
+        intro = f"<p><b>{offer['from_email']}</b> sent you a trade offer:</p>"
+        viewer = "recipient"
+    elif event in ("accepted", "declined"):
+        to, subject = offer["from_email"], f"Your trade offer was {event}"
+        intro = f"<p><b>{offer['to_email']}</b> {event} your trade offer:</p>"
+        viewer = "sender"
+    else:
+        return
+    msg = f"<p style='color:#555'>Message: “{offer['message']}”</p>" if offer.get("message") else ""
+    send_email_async(
+        to,
+        subject,
+        (
+            "<div style='font-family:sans-serif;max-width:520px'>"
+            "<h2 style='color:#0891b2'>The FAB Matrix — Trading Post</h2>"
+            f"{intro}{_offer_items_html(offer, viewer)}{msg}"
+            f"<p><a href='{link}' style='display:inline-block;padding:10px 18px;"
+            "background:#0891b2;color:#fff;text-decoration:none;border-radius:6px'>"
+            "Open the Trading Post</a></p>"
+            "</div>"
+        ),
+    )
+
+
 @router.post("/trade/offers")
 def trade_offer_create(req: OfferCreate, user: dict = Depends(_current_user)):
     """Send a trade offer: what you give (offer_items) and/or want (request_items).
@@ -232,7 +291,10 @@ def trade_offer_create(req: OfferCreate, user: dict = Depends(_current_user)):
                         [offer_id, side, pid, qty, val],
                     )
             cur.execute(_OFFER_BASE_SQL + " WHERE o.offer_id = %s", [offer_id])
-            return _offer_dict(cur, dict(cur.fetchone()))
+            result = _offer_dict(cur, dict(cur.fetchone()))
+    # Outside the transaction (committed) — notify the recipient, fire-and-forget.
+    _notify_offer(result, "created")
+    return result
 
 
 @router.get("/trade/offers")
@@ -280,4 +342,8 @@ def trade_offer_act(offer_id: int, req: OfferAction, user: dict = Depends(_curre
                 [new_status, offer_id],
             )
             offer["status"] = new_status
-            return _offer_dict(cur, offer)
+            result = _offer_dict(cur, offer)
+    # After commit: tell the sender their offer was accepted/declined (cancel is silent).
+    if new_status in ("accepted", "declined"):
+        _notify_offer(result, new_status)
+    return result

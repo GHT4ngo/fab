@@ -5,13 +5,11 @@ import os
 import secrets
 from typing import Optional
 
-import requests as http_requests
-
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from fab_api.core import HERE, get_conn, _slog
+from fab_api.core import HERE, get_conn, _slog, send_email
 
 router = APIRouter()
 
@@ -101,50 +99,28 @@ def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-RESEND_FROM    = os.getenv("RESEND_FROM", "FAB Matrix <onboarding@resend.dev>")
-
-
 def _deliver_magic_link(email: str, link: str) -> bool:
-    """Email the magic link via Resend; returns True when actually sent.
-
-    Without RESEND_API_KEY in .env this stays in dev mode: the link is only
-    logged (and returned as dev_link by /auth/request-link). NOTE: Resend's
-    free tier without a verified domain only delivers to the account owner's
-    own address — verify a domain in Resend to email other users.
-    """
+    """Email the magic link (core.send_email → Resend, noreply@t4ngo.com); returns
+    True when actually sent. Without RESEND_API_KEY this stays in dev mode: the
+    link is only logged (and returned as dev_link by /auth/request-link).
+    Sent SYNCHRONOUSLY on purpose — the response's `emailed` flag must be truthful
+    (it decides whether the frontend says 'check your email' or auto-signs-in)."""
     _slog(f"[AUTH] magic link for {email}: {link}")
-    if not RESEND_API_KEY:
-        return False
-    try:
-        resp = http_requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            json={
-                "from": RESEND_FROM,
-                "to": [email],
-                "subject": "Your FAB Matrix sign-in link",
-                "html": (
-                    "<div style='font-family:sans-serif;max-width:480px'>"
-                    "<h2 style='color:#0891b2'>The FAB Matrix</h2>"
-                    "<p>Click to sign in — the link is valid for 15 minutes:</p>"
-                    f"<p><a href='{link}' style='display:inline-block;padding:10px 18px;"
-                    "background:#0891b2;color:#fff;text-decoration:none;border-radius:6px'>"
-                    "Sign in</a></p>"
-                    f"<p style='color:#888;font-size:12px'>Or open: {link}</p>"
-                    "<p style='color:#888;font-size:12px'>If you didn't request this, ignore it.</p>"
-                    "</div>"
-                ),
-            },
-            timeout=10,
-        )
-        if resp.ok:
-            _slog(f"[AUTH] magic link emailed to {email} via Resend")
-            return True
-        _slog(f"[AUTH] Resend error {resp.status_code}: {resp.text[:200]} — falling back to dev link")
-    except Exception as e:
-        _slog(f"[AUTH] Resend send failed: {type(e).__name__}: {e} — falling back to dev link")
-    return False
+    return send_email(
+        email,
+        "Your FAB Matrix sign-in link",
+        (
+            "<div style='font-family:sans-serif;max-width:480px'>"
+            "<h2 style='color:#0891b2'>The FAB Matrix</h2>"
+            "<p>Click to sign in — the link is valid for 15 minutes:</p>"
+            f"<p><a href='{link}' style='display:inline-block;padding:10px 18px;"
+            "background:#0891b2;color:#fff;text-decoration:none;border-radius:6px'>"
+            "Sign in</a></p>"
+            f"<p style='color:#888;font-size:12px'>Or open: {link}</p>"
+            "<p style='color:#888;font-size:12px'>If you didn't request this, ignore it.</p>"
+            "</div>"
+        ),
+    )
 
 
 def _current_user(authorization: Optional[str] = Header(None)) -> dict:

@@ -32,6 +32,39 @@ PG_PORT     = int(os.getenv("PG_PORT", 5432))
 PG_USER     = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "")
 
+# ── Transactional email (Resend, t4ngo.com verified) ─────────────────────────
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM    = os.getenv("RESEND_FROM", "FAB Matrix <onboarding@resend.dev>")
+
+
+def send_email(to: str, subject: str, html: str) -> bool:
+    """Best-effort transactional email via Resend. Returns True when accepted.
+    Never raises — callers treat email as a side effect that must not break the
+    request (a failed notification is logged, not surfaced)."""
+    if not RESEND_API_KEY:
+        _slog(f"[EMAIL] no RESEND_API_KEY — skipped '{subject}' to {to}")
+        return False
+    try:
+        import requests
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={"from": RESEND_FROM, "to": [to], "subject": subject, "html": html},
+            timeout=10,
+        )
+        if resp.ok:
+            _slog(f"[EMAIL] sent '{subject}' to {to}")
+            return True
+        _slog(f"[EMAIL] Resend error {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        _slog(f"[EMAIL] send failed: {type(e).__name__}: {e}")
+    return False
+
+
+def send_email_async(to: str, subject: str, html: str) -> None:
+    """Fire-and-forget send_email on a daemon thread — keeps API responses snappy."""
+    threading.Thread(target=send_email, args=(to, subject, html), daemon=True).start()
+
 
 # Connection pool — a fresh psycopg2.connect per request costs TCP+auth setup
 # on every call; the pool keeps warm connections. get_conn() stays a context
