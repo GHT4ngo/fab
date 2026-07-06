@@ -440,6 +440,14 @@ select
         round(bm.price_eur              * e.rate_value, 0),
         round(tcg_prices.tcg_price_usd  * u.rate_value, 0)
     )                                               as price_sek,
+    nullif(lp.low, 0)                               as cm_low_eur,
+    -- Trade valuation (Phase 4 rule): trend price, or LOW if it's higher —
+    -- greatest(trend, low) in EUR → SEK; tcgcsv USD fills when no CM match.
+    -- GREATEST ignores nulls, so a missing low simply leaves trend.
+    coalesce(
+        round(greatest(bm.price_eur, nullif(lp.low, 0)) * e.rate_value, 0),
+        round(tcg_prices.tcg_price_usd * u.rate_value, 0)
+    )                                               as trade_value_sek,
     e.rate_value                                    as eur_to_sek_rate,
     coalesce(bm.cc_technique, cc.cc_technique)      as cc_technique,
     -- Which source produced price_sek, and how confident we are it's linked correctly.
@@ -472,6 +480,7 @@ from printings p
 cross join eur_to_sek e
 cross join usd_to_sek u
 left join best_match bm on bm.printing_unique_id = p.printing_unique_id
+left join latest_prices lp on lp.idproduct = bm.idproduct
 left join cc           on cc.printing_unique_id  = p.printing_unique_id
 left join tcg_prices   on tcg_prices.printing_unique_id = p.printing_unique_id
 
@@ -516,6 +525,8 @@ select
     mp.price_usd                                              as tcg_price_usd,
     mp.tcg_fetched_at                                         as tcg_fetched_at,
     round(mp.price_usd * u.rate_value, 0)                     as price_sek,
+    null::numeric                                             as cm_low_eur,
+    round(mp.price_usd * u.rate_value, 0)                     as trade_value_sek,
     e.rate_value                                             as eur_to_sek_rate,
     null::text                                                as cc_technique,
     case when mp.price_usd is not null then 'tcgcsv_usd' end  as price_source,

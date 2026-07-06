@@ -37,6 +37,8 @@ select
     tcg_price_usd,                                      -- JustTCG USD (null if not fetched)
     tcg_fetched_at,
     price_sek,
+    cm_low_eur,                                         -- Cardmarket LOW (cheapest listing), null if none
+    trade_value_sek,                                    -- Phase 4 valuation: greatest(trend, low) EUR->SEK, else USD->SEK
     eur_to_sek_rate,
     cc_technique,
     price_source,                                          -- which source produced price_sek
