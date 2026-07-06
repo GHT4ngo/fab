@@ -170,8 +170,13 @@ token as git's credential helper — if a push prompts for a password, run `gh a
 once (GitHub rejects passwords). The `retro-data-display` frontend is a **separate** repo
 (its own remote); the parent repo gitignores it.
 
-Latest verified post-cleanup shape (2026-06-28): `gold.gold_cards` has 17,256 rows,
-93.3% price coverage, 0 delimited display IDs, and all 13 dbt tests pass.
+Latest verified shape (2026-07-07): `gold.gold_cards` has 17,839 rows, **98.7% price
+coverage**, 0 delimited display IDs, all 13 dbt tests pass. The 239 unpriced rows are
+data-absent on both markets (135 tier-4 with no TCGplayer prices at all, 104 with no CM
+product under any matching name) — do NOT chase them with looser matching. Key coverage
+rules: a CM match with neither trend nor low is EXCLUDED from tiers 2/3/5 so the cascade
+continues (a priceless match must never block a priced lower tier); tier-2/5 price from
+trend, else the matched product's own low.
 
 ## Card detail view (Phase 1, DONE + live)
 - Frontend `CardDetailModal.tsx`: click a printing (grid or list) → full detail (image,

@@ -6,6 +6,21 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-07 — Coverage audit: priceless matches were blocking the cascade (`ffa7b9b`)
+
+User asked why ~879 printings had no price — "sorting error or discarded too early?"
+Diagnosis: BOTH classes existed, cleanly separable by tier:
+- 658 × tier 2: auto-matched to a CM product with null trend; best_match picks lowest
+  tier regardless of price → the priceless match BLOCKED tier-3 fallback. (454 of those
+  products had a real `low`; 594 had a priced fallback average — nearly all recoverable.)
+- 135 × tier 4 (no TCGplayer price fields at all) + 104 no-match (no CM product under
+  any name) → genuinely data-absent, correctly unpriced.
+Fix: tier-2/5 price = trend else matched product's own low; matches with neither are
+excluded from tiers 2/3/5 so the cascade continues. Coverage 95.1% → **98.7%** (+640).
+Remaining 239 are data-inherent — don't chase with looser matching.
+
+---
+
 ## 2026-07-07 — Trade offer email notifications (`3328262`)
 
 `core.send_email` (best-effort, never raises) + `send_email_async` (daemon thread);
