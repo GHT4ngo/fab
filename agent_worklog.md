@@ -6,6 +6,32 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-06 — Tools tab: price-gap explorer
+
+New web tab (fab `1e32fac`, frontend `f5b5c29`, both pushed; API restarted, same tunnel
+URL so no Lovable .env churn — the frontend push itself triggered the rebuild).
+
+- **`GET /tools/price-gap`** (`fab_api/routers/tools.py`): cards priced on BOTH markets
+  whose Cardmarket EUR and tcgcsv USD prices (normalised to SEK) diverge. Filters:
+  `direction` (usd|eur|any), `min_pct` (gap = pricier/cheaper − 1), `rarity`, `set_id`,
+  `card_class` (word-boundary regex on `type_text`, input sanitised to letters/hyphen),
+  `foil` (is_foil). Sort via whitelist dict (`_SORT_COLUMNS`) — sort params can't inject.
+  Rows missing either price excluded by definition (user requirement: no 0/null rows).
+- **`GET /tools/classes`**: distinct class/talent tokens from `type_text` (split on
+  ' - ', ';', ','; structural words like Action/Attack/Hero stopped out) — data-driven
+  so new sets' classes appear without code changes. 1 h cache header.
+- **Frontend `/tools`** (`src/pages/Tools.tsx` + nav tab): filter bar (direction, min %,
+  rarity, class, set, foil), clickable sortable column headers, pagination, row click →
+  CardDetailModal (row shimmed into `Card` shape via `toCard()`). Green = USD pricier,
+  magenta = EUR pricier.
+- Verified end-to-end via a same-origin dist build served by a test API instance
+  (12,599 dual-priced rows; direction/%/class/foil/set/rarity combos + injection guard).
+- Also diagnosed a "tesseract stopped working" toast on the phone: tesseract 5.5.0 is
+  fine; the log shows one garbage OCR read from a blurry frame + the known missing
+  easyocr/orb-descriptor fallbacks. Transient capture issue, not config.
+
+---
+
 ## 2026-07-05 — Foundation hardening: backups, API perf, router split, web polish
 
 Sanity-check session ("are we on the right track?") → verdict: pipeline + product are

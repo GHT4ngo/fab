@@ -27,7 +27,7 @@ sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.si
 ## API layout (split 2026-07-05)
 `api.py` is thin wiring only (middleware, include_router, static mount) — still run as
 `python api.py` / `uvicorn api:app`. Endpoints live in `fab_api/routers/`
-(`cards`, `admin`, `scan`, `auth`, `cardlists`); shared env + the **pooled**
+(`cards`, `admin`, `scan`, `auth`, `cardlists`, `tools`); shared env + the **pooled**
 `get_conn()` context manager (ThreadedConnectionPool, commits on exit, returns conn to
 the pool) in `fab_api/core.py`; the OCR/visual scan engine — moved **verbatim**, logic
 untouched — in `fab_api/scan_engine.py`. GZip middleware compresses `/cards` (~11×);
