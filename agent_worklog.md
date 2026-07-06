@@ -6,6 +6,19 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-07 — Trade offer email notifications (`3328262`)
+
+`core.send_email` (best-effort, never raises) + `send_email_async` (daemon thread);
+magic-link sender refactored onto it (kept synchronous — the `emailed` response flag
+must be truthful). Trade router: recipient emailed on offer creation, sender on
+accept/decline (cancel silent by design); item lists + totals labelled from the
+reader's perspective; sent AFTER the transaction commits, fire-and-forget so a Resend
+outage can't fail an offer. Verified live between the user's two real accounts
+(gmail ↔ alphaspel): both mails delivered; offer #2 left in place as demo (accepted,
+message "Test of offer notifications"). Also re-verified magic-link flow post-refactor.
+
+---
+
 ## 2026-07-07 — PERMANENT DOMAIN: fabmatrix.t4ngo.com (tunnel thorn dead) (`4c204b8`)
 
 User bought **t4ngo.com** at Cloudflare Registrar (checkout initially failed — blocked
