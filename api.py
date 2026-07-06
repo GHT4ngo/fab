@@ -12,7 +12,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from fab_api.core import HERE
-from fab_api.routers import admin, auth, cardlists, cards, scan
+from fab_api.routers import admin, auth, cardlists, cards, scan, tools
 
 app = FastAPI(title="FaB Store API", version="1.1.0")
 
@@ -33,6 +33,7 @@ app.include_router(admin.router)
 app.include_router(scan.router)
 app.include_router(auth.router)
 app.include_router(cardlists.router)
+app.include_router(tools.router)
 
 # ── Serve the built frontend ────────────────────────────────────────────────
 # Mounted last so it only catches paths not handled by an API route above.
