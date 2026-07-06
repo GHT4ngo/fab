@@ -194,16 +194,42 @@ cm_anchor_pool as (
     join cm_products cp on cp.base_name = p.name_key
 ),
 
-cm_anchored as (
+cm_anchored_pick as (
     select distinct on (printing_unique_id)
+        printing_unique_id,
+        idproduct,
+        price_eur,
+        eur_sek,
+        usd_sek
+    from cm_anchor_pool
+    where price_eur is not null
+    order by printing_unique_id, abs(eur_sek - usd_sek) asc, price_eur asc
+),
+
+-- Sanity guard: if even the CLOSEST candidate is wildly off the anchor, Cardmarket
+-- simply has no product for this printing (e.g. HNT055 Cindra token $0.08 whose only
+-- bare-name candidates are the €5.72 armory-deck hero and the €30 Marvel; or cold-foil
+-- WTR080 Breaking Scales $94 where CM only lists the €0.75 regular). Matching anyway
+-- attaches a same-named-but-different product. These printings get NO automated CM
+-- match (manual crosswalk still allowed) and fall through to the tcgcsv USD price.
+-- Bounds are deliberately extreme (≥20× AND ≥50 SEK) so the documented genuine EU/US
+-- market gaps in the 3-20× band keep their Cardmarket price (basis stays CM-first).
+cm_anchor_rejected as (
+    select printing_unique_id
+    from cm_anchored_pick
+    where greatest(eur_sek, usd_sek) / nullif(least(eur_sek, usd_sek), 0) >= 20
+      and abs(eur_sek - usd_sek) >= 50
+),
+
+cm_anchored as (
+    select
         printing_unique_id,
         idproduct,
         price_eur,
         1                                           as match_tier,
         null::text                                  as cc_technique
-    from cm_anchor_pool
-    where price_eur is not null
-    order by printing_unique_id, abs(eur_sek - usd_sek) asc, price_eur asc
+    from cm_anchored_pick
+    where printing_unique_id not in (select printing_unique_id from cm_anchor_rejected)
 ),
 
 -- 2) AUTO (heuristic): no tcgcsv anchor → foil-pair price-rank + collectors_centre.
@@ -289,12 +315,17 @@ cm_manual as (
 ),
 
 -- Best Cardmarket match per printing: lowest match_tier wins (anchored beats manual).
+-- Anchor-rejected printings skip the heuristic/fallback tiers too — those tiers draw
+-- from the same (wrong) bare-name pool the anchor already ruled out. Manual stays: a
+-- hand-curated crosswalk row is an explicit human override.
 best_match_all as (
     select printing_unique_id, idproduct, price_eur, match_tier, cc_technique from cm_anchored
     union all
     select printing_unique_id, idproduct, price_eur, match_tier, cc_technique from cm_heuristic
+    where printing_unique_id not in (select printing_unique_id from cm_anchor_rejected)
     union all
     select printing_unique_id, idproduct, price_eur, match_tier, cc_technique from cm_fallback
+    where printing_unique_id not in (select printing_unique_id from cm_anchor_rejected)
     union all
     select printing_unique_id, idproduct, price_eur, match_tier, cc_technique from cm_manual
 ),
