@@ -1,15 +1,17 @@
 # FAB — Flesh and Blood card data app
 
-A data pipeline + API + web frontend for Flesh and Blood TCG card data and prices.
+**Live at https://fabmatrix.t4ngo.com** — a data pipeline + API + web frontend for
+Flesh and Blood TCG card data, prices, collection tracking, and card trading.
 
 - **Pipeline** (`ingest_bronze.py`, `ingest_tcgcsv.py`) downloads card data
   (the-fab-cube), prices (Cardmarket + tcgcsv/TCGplayer), and exchange rates into
   PostgreSQL `bronze.*`.
 - **Transform** (`fab_dbt/`, a dbt project) builds `silver.silver_cards` →
   `gold.gold_cards`.
-- **API** (`api.py`, FastAPI) serves `gold.gold_cards` at `/cards`, `/sets`, `/stats`,
-  admin quality endpoints, and card-scanning endpoints (`/scan`, `/scan/native`). It also
-  serves the built frontend at `/`.
+- **API** (`api.py` wiring + `fab_api/` routers, FastAPI) serves `gold.gold_cards` at
+  `/cards`, `/sets`, `/stats`, admin quality endpoints, card scanning (`/scan/native`,
+  `/scan/code`), passwordless accounts + cardlists (`/auth`, `/cardlists`), price tools
+  (`/tools`), and trading (`/trade`). It also serves the built frontend at `/`.
 - **Frontend** (`retro-data-display/`, Vite + React + TS) — a retro card search UI and
   scanner session page, hosted by **Lovable** from the `retro-data-display` GitHub repo.
   It reaches the API over the persistent cloudflared tunnel.
@@ -81,10 +83,13 @@ curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloud
 
 .venv/bin/python start_fab.py
 ```
-`start_fab.py` exposes the API at a `https://<random>.trycloudflare.com` URL and saves it to
-`tmp/logs/tunnel_url.txt`. The Cloudflare quick tunnel is persistent and detached, so normal
-API restarts reuse the same public URL. Direct `start_fab.py` does **not** push Git/Lovable
-unless called with `--sync-lovable` or `PUSH_LOVABLE=1`.
+`start_fab.py` exposes the API at the **permanent URL `https://fabmatrix.t4ngo.com`** — a
+named Cloudflare tunnel (`fab`) on the owned domain t4ngo.com, configured in
+`~/.cloudflared/config.yml`. The URL never changes across restarts/reboots, and it is
+saved to `tmp/logs/tunnel_url.txt` for tooling. If the named-tunnel config is missing,
+`start_fab.py` falls back to an ephemeral `https://<random>.trycloudflare.com` quick
+tunnel. Direct `start_fab.py` does **not** push Git/Lovable unless called with
+`--sync-lovable` or `PUSH_LOVABLE=1` (with the fixed domain this is rarely needed).
 
 Frontend hosting — two options:
 - **Lovable (current):** the app is hosted by Lovable from the `retro-data-display` GitHub
