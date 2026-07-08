@@ -293,11 +293,15 @@ CREATE INDEX IF NOT EXISTS scanned_cards_display_id ON app.scanned_cards (displa
 CREATE TABLE IF NOT EXISTS app.users (
     user_id        BIGSERIAL   PRIMARY KEY,
     email          TEXT        NOT NULL UNIQUE,
+    username       TEXT        UNIQUE,
     password_hash  TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at  TIMESTAMPTZ
 );
+ALTER TABLE app.users ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE app.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
+    ON app.users (lower(username)) WHERE username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS app.magic_tokens (
     token       TEXT        PRIMARY KEY,
@@ -375,9 +379,15 @@ CREATE TABLE IF NOT EXISTS app.trade_offer_items (
     side               TEXT      NOT NULL,
     printing_unique_id TEXT      NOT NULL,
     qty                INTEGER   NOT NULL DEFAULT 1,
+    base_value_sek     NUMERIC,
     value_sek          NUMERIC,
+    discount_type      TEXT,
+    discount_value     NUMERIC,
     UNIQUE (offer_id, side, printing_unique_id)
 );
+ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS base_value_sek NUMERIC;
+ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_type TEXT;
+ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_value NUMERIC;
 """
 
 

@@ -35,11 +35,15 @@ CREATE SCHEMA IF NOT EXISTS app;
 CREATE TABLE IF NOT EXISTS app.users (
     user_id        BIGSERIAL   PRIMARY KEY,
     email          TEXT        NOT NULL UNIQUE,
+    username       TEXT        UNIQUE,
     password_hash  TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at  TIMESTAMPTZ
 );
+ALTER TABLE app.users ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE app.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
+    ON app.users (lower(username)) WHERE username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS app.magic_tokens (
     token       TEXT        PRIMARY KEY,
@@ -140,6 +144,29 @@ def _mint_session(cur, user_id: int) -> str:
     return session_token
 
 
+def _clean_username(raw: str | None) -> str | None:
+    username = (raw or "").strip()
+    if len(username) < 3 or len(username) > 32:
+        return None
+    if not all(ch.isalnum() or ch in "_-" for ch in username):
+        return None
+    return username
+
+
+def _ensure_username(cur, user_id: int) -> str:
+    cur.execute("SELECT username FROM app.users WHERE user_id = %s", [user_id])
+    row = cur.fetchone()
+    if row and row.get("username"):
+        return row["username"]
+    for candidate in [f"User{user_id}"] + [f"User{user_id}-{i}" for i in range(2, 20)]:
+        cur.execute("SELECT 1 FROM app.users WHERE lower(username) = lower(%s)", [candidate])
+        if cur.fetchone():
+            continue
+        cur.execute("UPDATE app.users SET username = %s WHERE user_id = %s", [candidate, user_id])
+        return candidate
+    raise HTTPException(status_code=500, detail="Could not assign username")
+
+
 def _public_base_url() -> str:
     """Best-effort public origin for building the magic link (the live tunnel URL)."""
     try:
@@ -198,10 +225,17 @@ def _current_user(authorization: Optional[str] = Header(None)) -> dict:
             if not row:
                 raise HTTPException(status_code=401, detail="Session expired or invalid")
             cur.execute(
-                "SELECT user_id, email, created_at, last_login_at FROM app.users WHERE user_id = %s",
+                "SELECT user_id, email, username, created_at, last_login_at FROM app.users WHERE user_id = %s",
                 [row["user_id"]],
             )
             user = cur.fetchone()
+            if user and not user.get("username"):
+                _ensure_username(cur, user["user_id"])
+                cur.execute(
+                    "SELECT user_id, email, username, created_at, last_login_at FROM app.users WHERE user_id = %s",
+                    [row["user_id"]],
+                )
+                user = cur.fetchone()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return dict(user)
@@ -231,6 +265,10 @@ class PasswordLoginRequest(BaseModel):
 
 class SetPasswordRequest(BaseModel):
     password: str
+
+
+class UsernameRequest(BaseModel):
+    username: str
 
 
 @router.post("/auth/request-link")
@@ -289,16 +327,18 @@ def auth_verify(token: str = Query(...)):
             cur.execute(
                 "INSERT INTO app.users (email, last_login_at) VALUES (%s, NOW()) "
                 "ON CONFLICT (email) DO UPDATE SET last_login_at = NOW() "
-                "RETURNING user_id, email",
+                "RETURNING user_id, email, username",
                 [email],
             )
             user = cur.fetchone()
+            username = _ensure_username(cur, user["user_id"])
 
             session_token = _mint_session(cur, user["user_id"])
     return {
         "session_token": session_token,
         "user_id": user["user_id"],
         "email": user["email"],
+        "username": username,
         "expires_in": SESSION_TTL,
     }
 
@@ -332,7 +372,7 @@ def auth_password(req: PasswordLoginRequest):
             if not user:
                 cur.execute(
                     "INSERT INTO app.users (email, password_hash, last_login_at) "
-                    "VALUES (%s, %s, NOW()) RETURNING user_id, email",
+                    "VALUES (%s, %s, NOW()) RETURNING user_id, email, username",
                     [email, password_hash],
                 )
                 user = cur.fetchone()
@@ -341,7 +381,7 @@ def auth_password(req: PasswordLoginRequest):
             elif not user.get("password_hash"):
                 cur.execute(
                     "UPDATE app.users SET password_hash = %s, last_login_at = NOW() "
-                    "WHERE user_id = %s RETURNING user_id, email",
+                    "WHERE user_id = %s RETURNING user_id, email, username",
                     [password_hash, user["user_id"]],
                 )
                 user = cur.fetchone()
@@ -351,17 +391,19 @@ def auth_password(req: PasswordLoginRequest):
                     raise HTTPException(status_code=401, detail="Email or password is incorrect")
                 cur.execute(
                     "UPDATE app.users SET last_login_at = NOW() "
-                    "WHERE user_id = %s RETURNING user_id, email",
+                    "WHERE user_id = %s RETURNING user_id, email, username",
                     [user["user_id"]],
                 )
                 user = cur.fetchone()
 
+            username = _ensure_username(cur, user["user_id"])
             session_token = _mint_session(cur, user["user_id"])
 
     return {
         "session_token": session_token,
         "user_id": user["user_id"],
         "email": user["email"],
+        "username": username,
         "expires_in": SESSION_TTL,
         "created": created,
         "password_set": password_set,
@@ -384,12 +426,35 @@ def auth_set_password(req: SetPasswordRequest, user: dict = Depends(_current_use
     return {"ok": True}
 
 
+@router.post("/auth/username")
+def auth_set_username(req: UsernameRequest, user: dict = Depends(_current_user)):
+    ensure_app_auth_schema()
+    username = _clean_username(req.username)
+    if not username:
+        return JSONResponse(status_code=400, content={"error": "Username must be 3-32 letters, numbers, _ or -"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM app.users WHERE lower(username) = lower(%s) AND user_id <> %s",
+                [username, user["user_id"]],
+            )
+            if cur.fetchone():
+                return JSONResponse(status_code=409, content={"error": "Username is already taken"})
+            cur.execute(
+                "UPDATE app.users SET username = %s WHERE user_id = %s RETURNING user_id, email, username",
+                [username, user["user_id"]],
+            )
+            row = cur.fetchone()
+    return {"user_id": row["user_id"], "email": row["email"], "username": row["username"]}
+
+
 @router.get("/auth/me")
 def auth_me(user: dict = Depends(_current_user)):
     """Who am I — validates the session token and returns the account."""
     return {
         "user_id": user["user_id"],
         "email": user["email"],
+        "username": user.get("username"),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
         "last_login_at": user["last_login_at"].isoformat() if user.get("last_login_at") else None,
     }

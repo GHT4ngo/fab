@@ -51,9 +51,15 @@ CREATE TABLE IF NOT EXISTS app.trade_offer_items (
     side               TEXT      NOT NULL,
     printing_unique_id TEXT      NOT NULL,
     qty                INTEGER   NOT NULL DEFAULT 1,
+    base_value_sek     NUMERIC,
     value_sek          NUMERIC,
+    discount_type      TEXT,
+    discount_value     NUMERIC,
     UNIQUE (offer_id, side, printing_unique_id)
 );
+ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS base_value_sek NUMERIC;
+ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_type TEXT;
+ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_value NUMERIC;
 """
 
 _trade_schema_ready = False
@@ -72,6 +78,9 @@ def ensure_app_trade_schema():
 class OfferItem(BaseModel):
     printing_unique_id: str
     qty: int = 1
+    value_sek: Optional[float] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
 
 
 class OfferCreate(BaseModel):
@@ -84,6 +93,15 @@ class OfferCreate(BaseModel):
 class ListOfferCreate(BaseModel):
     offer_cardlist_id: int                # sender gives this list
     request_cardlist_id: int              # sender wants this list
+    message: Optional[str] = None
+
+
+class FastTradeCreate(BaseModel):
+    other_username: Optional[str] = None
+    you_label: str = "Your side"
+    them_label: str = "Their side"
+    you_total_sek: float = 0
+    them_total_sek: float = 0
     message: Optional[str] = None
 
 
@@ -195,7 +213,7 @@ def trade_lists(
 
 # ── Offers ────────────────────────────────────────────────────────────────────
 
-def _snapshot_values(cur, items: list[OfferItem]) -> list[tuple[str, int, Optional[float]]]:
+def _snapshot_values(cur, items: list[OfferItem]) -> list[tuple[str, int, Optional[float], Optional[float], Optional[str], Optional[float]]]:
     """Validate printings exist and snapshot their trade value (per unit) now."""
     out = []
     for it in items:
@@ -208,8 +226,15 @@ def _snapshot_values(cur, items: list[OfferItem]) -> list[tuple[str, int, Option
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Unknown printing: {pid}")
-        val = float(row["trade_value_sek"]) if row["trade_value_sek"] is not None else None
-        out.append((pid, qty, val))
+        base_val = float(row["trade_value_sek"]) if row["trade_value_sek"] is not None else None
+        discount_type = (it.discount_type or "none").lower()
+        if discount_type not in ("none", "sek", "pct"):
+            discount_type = "none"
+        discount_value = max(0.0, float(it.discount_value or 0))
+        val = float(it.value_sek) if it.value_sek is not None else base_val
+        if val is not None:
+            val = max(0.0, val)
+        out.append((pid, qty, base_val, val, discount_type, discount_value if discount_type != "none" else 0))
     return out
 
 
@@ -269,7 +294,8 @@ def _offer_dict(cur, offer_row: dict) -> dict:
     cur.execute(
         """
         SELECT
-            t.side, t.printing_unique_id, t.qty, t.value_sek,
+            t.side, t.printing_unique_id, t.qty, t.base_value_sek, t.value_sek,
+            t.discount_type, t.discount_value,
             g.name, g.display_id, g.set_id, g.edition, g.foiling, g.rarity, g.image_url,
             g.trade_value_sek AS current_value_sek
         FROM app.trade_offer_items t
@@ -285,12 +311,19 @@ def _offer_dict(cur, offer_row: dict) -> dict:
     for r in cur.fetchall():
         d = dict(r)
         d["value_sek"] = float(d["value_sek"]) if d["value_sek"] is not None else None
+        d["base_value_sek"] = float(d["base_value_sek"]) if d["base_value_sek"] is not None else None
+        d["discount_value"] = float(d["discount_value"]) if d["discount_value"] is not None else None
         d["current_value_sek"] = float(d["current_value_sek"]) if d["current_value_sek"] is not None else None
         if d["value_sek"] is not None:
             totals[d["side"]] += d["value_sek"] * d["qty"]
         if d["current_value_sek"] is not None:
             current_totals[d["side"]] += d["current_value_sek"] * d["qty"]
         items.append(d)
+    if not items and offer_row.get("kind") == "fast":
+        totals["offer"] = float(offer_row.get("offer_list_total_sek") or 0)
+        totals["request"] = float(offer_row.get("request_list_total_sek") or 0)
+        current_totals["offer"] = totals["offer"]
+        current_totals["request"] = totals["request"]
     return {
         "offer_id": offer_row["offer_id"],
         "kind": offer_row.get("kind") or "cards",
@@ -422,14 +455,14 @@ def trade_offer_create(req: OfferCreate, user: dict = Depends(_current_user)):
             )
             offer_id = cur.fetchone()["offer_id"]
             for side, rows in (("offer", give), ("request", want)):
-                for pid, qty, val in rows:
+                for pid, qty, base_val, val, discount_type, discount_value in rows:
                     cur.execute(
                         "INSERT INTO app.trade_offer_items "
-                        "(offer_id, side, printing_unique_id, qty, value_sek) "
-                        "VALUES (%s, %s, %s, %s, %s) "
+                        "(offer_id, side, printing_unique_id, qty, base_value_sek, value_sek, discount_type, discount_value) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                         "ON CONFLICT (offer_id, side, printing_unique_id) "
                         "DO UPDATE SET qty = app.trade_offer_items.qty + EXCLUDED.qty",
-                        [offer_id, side, pid, qty, val],
+                        [offer_id, side, pid, qty, base_val, val, discount_type, discount_value],
                     )
             cur.execute(_OFFER_BASE_SQL + " WHERE o.offer_id = %s", [offer_id])
             result = _offer_dict(cur, dict(cur.fetchone()))
@@ -477,17 +510,59 @@ def trade_list_offer_create(req: ListOfferCreate, user: dict = Depends(_current_
                     cur.execute(
                         """
                         INSERT INTO app.trade_offer_items
-                            (offer_id, side, printing_unique_id, qty, value_sek)
-                        VALUES (%s, %s, %s, %s, %s)
+                            (offer_id, side, printing_unique_id, qty, base_value_sek, value_sek, discount_type, discount_value)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'none', 0)
                         ON CONFLICT (offer_id, side, printing_unique_id)
                         DO UPDATE SET qty = app.trade_offer_items.qty + EXCLUDED.qty
                         """,
-                        [offer_id, side, pid, qty, val],
+                        [offer_id, side, pid, qty, val, val],
                     )
             cur.execute(_OFFER_BASE_SQL + " WHERE o.offer_id = %s", [offer_id])
             result = _offer_dict(cur, dict(cur.fetchone()))
     if result["to_user_id"] != result["from_user_id"]:
         _notify_offer(result, "created")
+    return result
+
+
+@router.post("/trade/fast")
+def trade_fast_create(req: FastTradeCreate, user: dict = Depends(_current_user)):
+    """Record a completed one-unit trade. If other_username matches an existing
+    account, the record is shared with that user's trade history. Otherwise it is
+    stored only on the current user's account."""
+    ensure_app_trade_schema()
+    you_label = (req.you_label or "Your side").strip()[:120]
+    them_label = (req.them_label or "Their side").strip()[:120]
+    message = (req.message or "").strip()[:1000] or None
+    you_total = max(0.0, float(req.you_total_sek or 0))
+    them_total = max(0.0, float(req.them_total_sek or 0))
+    other_username = (req.other_username or "").strip()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            to_user_id = user["user_id"]
+            if other_username:
+                cur.execute(
+                    "SELECT user_id FROM app.users WHERE lower(username) = lower(%s)",
+                    [other_username],
+                )
+                row = cur.fetchone()
+                if row:
+                    to_user_id = row["user_id"]
+            cur.execute(
+                """
+                INSERT INTO app.trade_offers (
+                    from_user_id, to_user_id, status, kind, message,
+                    offer_list_name, offer_list_total_sek,
+                    request_list_name, request_list_total_sek
+                )
+                VALUES (%s, %s, 'accepted', 'fast', %s, %s, %s, %s, %s)
+                RETURNING offer_id
+                """,
+                [user["user_id"], to_user_id, message, you_label, you_total, them_label, them_total],
+            )
+            offer_id = cur.fetchone()["offer_id"]
+            cur.execute(_OFFER_BASE_SQL + " WHERE o.offer_id = %s", [offer_id])
+            result = _offer_dict(cur, dict(cur.fetchone()))
     return result
 
 

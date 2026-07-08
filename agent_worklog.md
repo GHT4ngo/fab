@@ -36,6 +36,24 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
     difference, and current profit/loss from today's item values.
   - Verified 2026-07-08: Python compile, Vite production build, API restart, and
     `GET /trade/lists` smoke check. Caveat: no browser screenshot/manual UX pass yet.
+- 2026-07-08 follow-up mobile/trade/account/scanner pass:
+  - Mobile card detail modal starts lower under the sticky nav and uses a smaller initial
+    image on narrow phones.
+  - Browse nav dispatches a reset event even when already on Browse; Browse clears query,
+    filters, selected modal, view/page, URL params, and scrolls to top.
+  - Add-to-list control has quantity +/- before selecting a list and scrolls itself into
+    view when opened on mobile.
+  - Users now have usernames. Existing users are assigned `User<user_id>` lazily; new users
+    get one automatically and can rename it in Account.
+  - Trade offer builder supports per-card discount as none / % / SEK and snapshots the
+    discounted value in `app.trade_offer_items`.
+  - Fast trade recorder added: one completed trade unit with optional other username,
+    labels, SEK totals, and notes. If the username exists, the trade appears for both
+    accounts; otherwise it is stored on the current account.
+  - Scan page cleaned up: install/update scanner button, less explanatory text, and manual
+    search by card name in addition to set-code entry.
+  - Caveat: browser cannot reliably detect whether the Android APK is already installed;
+    "Install / update scanner" downloads the current APK.
 
 ---
 
