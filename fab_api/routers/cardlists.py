@@ -25,8 +25,11 @@ class CardlistItemAdd(BaseModel):
     qty: int = 1
 
 
-class CardlistItemQty(BaseModel):
-    qty: int
+class CardlistItemUpdate(BaseModel):
+    qty: int | None = None
+    printing_unique_id: str | None = None
+    discount_type: str | None = None
+    discount_value: float | None = None
 
 
 
@@ -40,8 +43,12 @@ def cardlists_list(user: dict = Depends(_current_user)):
                 """
                 SELECT
                     l.cardlist_id, l.name, l.is_trade_list, l.created_at, l.updated_at,
-                    COALESCE(SUM(i.qty), 0)                        AS item_count,
-                    COALESCE(SUM(i.qty * COALESCE(g.price_sek, 0)), 0) AS total_sek
+                    COALESCE(SUM(i.qty), 0) AS item_count,
+                    COALESCE(SUM(i.qty * GREATEST(0, CASE
+                        WHEN i.discount_type = 'pct' THEN COALESCE(g.price_sek, 0) * (1 - LEAST(COALESCE(i.discount_value, 0), 100) / 100)
+                        WHEN i.discount_type = 'sek' THEN COALESCE(g.price_sek, 0) - COALESCE(i.discount_value, 0)
+                        ELSE COALESCE(g.price_sek, 0)
+                    END)), 0) AS total_sek
                 FROM app.cardlists l
                 LEFT JOIN app.cardlist_items i ON i.cardlist_id = l.cardlist_id
                 LEFT JOIN gold.gold_cards g    ON g.printing_unique_id = i.printing_unique_id
@@ -90,15 +97,21 @@ def cardlists_create(req: CardlistCreate, user: dict = Depends(_current_user)):
 @router.get("/cardlists/{cardlist_id}")
 def cardlists_get(cardlist_id: int, user: dict = Depends(_current_user)):
     """A cardlist with its items joined to gold.gold_cards for display."""
+    ensure_app_trade_schema()
     with get_conn() as conn:
         with conn.cursor() as cur:
             lst = _get_owned_cardlist(cur, user["user_id"], cardlist_id)
             cur.execute(
                 """
                 SELECT
-                    i.printing_unique_id, i.qty, i.added_at,
+                    i.printing_unique_id, i.qty, i.added_at, i.discount_type, i.discount_value,
                     g.name, g.set_id, g.edition, g.foiling,
-                    g.rarity, g.image_url, g.price_sek
+                    g.rarity, g.image_url, g.price_sek,
+                    GREATEST(0, CASE
+                        WHEN i.discount_type = 'pct' THEN COALESCE(g.price_sek, 0) * (1 - LEAST(COALESCE(i.discount_value, 0), 100) / 100)
+                        WHEN i.discount_type = 'sek' THEN COALESCE(g.price_sek, 0) - COALESCE(i.discount_value, 0)
+                        ELSE COALESCE(g.price_sek, 0)
+                    END) AS effective_price_sek
                 FROM app.cardlist_items i
                 LEFT JOIN gold.gold_cards g ON g.printing_unique_id = i.printing_unique_id
                 WHERE i.cardlist_id = %s
@@ -112,7 +125,8 @@ def cardlists_get(cardlist_id: int, user: dict = Depends(_current_user)):
     total = 0
     for it in items:
         price = int(it["price_sek"]) if it["price_sek"] is not None else None
-        total += (price or 0) * it["qty"]
+        effective_price = int(it["effective_price_sek"]) if it["effective_price_sek"] is not None else None
+        total += (effective_price or 0) * it["qty"]
         out_items.append({
             "printing_unique_id": it["printing_unique_id"],
             "qty": it["qty"],
@@ -124,6 +138,9 @@ def cardlists_get(cardlist_id: int, user: dict = Depends(_current_user)):
             "rarity": it["rarity"],
             "image_url": it["image_url"],
             "price_sek": price,
+            "effective_price_sek": effective_price,
+            "discount_type": it["discount_type"] or "none",
+            "discount_value": float(it["discount_value"]) if it["discount_value"] is not None else 0,
         })
     return {
         "cardlist_id": lst["cardlist_id"],
@@ -207,29 +224,88 @@ def cardlists_add_item(cardlist_id: int, req: CardlistItemAdd, user: dict = Depe
 
 
 @router.patch("/cardlists/{cardlist_id}/items/{printing_unique_id}")
-def cardlists_set_item_qty(cardlist_id: int, printing_unique_id: str, req: CardlistItemQty,
-                           user: dict = Depends(_current_user)):
-    """Set an item's quantity. qty <= 0 removes it."""
+def cardlists_update_item(cardlist_id: int, printing_unique_id: str, req: CardlistItemUpdate,
+                          user: dict = Depends(_current_user)):
+    """Update quantity, discount, or move an item to another printing. qty <= 0 removes it."""
+    ensure_app_trade_schema()
+    new_printing_id = (req.printing_unique_id or printing_unique_id).strip()
+    discount_type = (req.discount_type or "none").lower()
+    if discount_type not in ("none", "sek", "pct"):
+        discount_type = "none"
+    discount_value = max(0.0, float(req.discount_value or 0))
     with get_conn() as conn:
         with conn.cursor() as cur:
             _get_owned_cardlist(cur, user["user_id"], cardlist_id)
-            if req.qty <= 0:
+            if new_printing_id != printing_unique_id:
+                cur.execute("SELECT 1 FROM gold.gold_cards WHERE printing_unique_id = %s", [new_printing_id])
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Unknown replacement printing_unique_id")
+
+            cur.execute(
+                "SELECT qty FROM app.cardlist_items WHERE cardlist_id = %s AND printing_unique_id = %s",
+                [cardlist_id, printing_unique_id],
+            )
+            current = cur.fetchone()
+            if not current:
+                raise HTTPException(status_code=404, detail="Item not in cardlist")
+
+            next_qty = current["qty"] if req.qty is None else min(9999, req.qty)
+            if next_qty <= 0:
                 cur.execute(
                     "DELETE FROM app.cardlist_items WHERE cardlist_id = %s AND printing_unique_id = %s",
                     [cardlist_id, printing_unique_id],
                 )
                 removed = True
             else:
-                cur.execute(
-                    "UPDATE app.cardlist_items SET qty = %s "
-                    "WHERE cardlist_id = %s AND printing_unique_id = %s RETURNING qty",
-                    [min(9999, req.qty), cardlist_id, printing_unique_id],
-                )
-                if not cur.fetchone():
-                    raise HTTPException(status_code=404, detail="Item not in cardlist")
+                if new_printing_id != printing_unique_id:
+                    cur.execute(
+                        """
+                        INSERT INTO app.cardlist_items
+                            (cardlist_id, printing_unique_id, qty, discount_type, discount_value)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (cardlist_id, printing_unique_id)
+                        DO UPDATE SET
+                            qty = EXCLUDED.qty,
+                            discount_type = EXCLUDED.discount_type,
+                            discount_value = EXCLUDED.discount_value
+                        """,
+                        [
+                            cardlist_id,
+                            new_printing_id,
+                            next_qty,
+                            None if discount_type == "none" else discount_type,
+                            0 if discount_type == "none" else discount_value,
+                        ],
+                    )
+                    cur.execute(
+                        "DELETE FROM app.cardlist_items WHERE cardlist_id = %s AND printing_unique_id = %s",
+                        [cardlist_id, printing_unique_id],
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE app.cardlist_items
+                           SET qty = %s, discount_type = %s, discount_value = %s
+                         WHERE cardlist_id = %s AND printing_unique_id = %s
+                         RETURNING qty
+                        """,
+                        [
+                            next_qty,
+                            None if discount_type == "none" else discount_type,
+                            0 if discount_type == "none" else discount_value,
+                            cardlist_id,
+                            printing_unique_id,
+                        ],
+                    )
                 removed = False
             cur.execute("UPDATE app.cardlists SET updated_at = NOW() WHERE cardlist_id = %s", [cardlist_id])
-    return {"printing_unique_id": printing_unique_id, "qty": 0 if removed else min(9999, req.qty), "removed": removed}
+    return {
+        "printing_unique_id": new_printing_id,
+        "qty": 0 if removed else next_qty,
+        "discount_type": discount_type,
+        "discount_value": 0 if discount_type == "none" else discount_value,
+        "removed": removed,
+    }
 
 
 @router.delete("/cardlists/{cardlist_id}/items/{printing_unique_id}")

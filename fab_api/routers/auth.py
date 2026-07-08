@@ -36,14 +36,20 @@ CREATE TABLE IF NOT EXISTS app.users (
     user_id        BIGSERIAL   PRIMARY KEY,
     email          TEXT        NOT NULL UNIQUE,
     username       TEXT        UNIQUE,
+    is_dev         BOOLEAN     NOT NULL DEFAULT FALSE,
     password_hash  TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at  TIMESTAMPTZ
 );
 ALTER TABLE app.users ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE app.users ADD COLUMN IF NOT EXISTS is_dev BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE app.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
     ON app.users (lower(username)) WHERE username IS NOT NULL;
+UPDATE app.users
+   SET is_dev = TRUE
+ WHERE lower(coalesce(username, '')) = 't4ngo'
+    OR lower(email) IN ('t4ngo', 't4ngo@t4ngo.com', 'tango.christofer@gmail.com');
 
 CREATE TABLE IF NOT EXISTS app.magic_tokens (
     token       TEXT        PRIMARY KEY,
@@ -225,14 +231,14 @@ def _current_user(authorization: Optional[str] = Header(None)) -> dict:
             if not row:
                 raise HTTPException(status_code=401, detail="Session expired or invalid")
             cur.execute(
-                "SELECT user_id, email, username, created_at, last_login_at FROM app.users WHERE user_id = %s",
+                "SELECT user_id, email, username, is_dev, created_at, last_login_at FROM app.users WHERE user_id = %s",
                 [row["user_id"]],
             )
             user = cur.fetchone()
             if user and not user.get("username"):
                 _ensure_username(cur, user["user_id"])
                 cur.execute(
-                    "SELECT user_id, email, username, created_at, last_login_at FROM app.users WHERE user_id = %s",
+                    "SELECT user_id, email, username, is_dev, created_at, last_login_at FROM app.users WHERE user_id = %s",
                     [row["user_id"]],
                 )
                 user = cur.fetchone()
@@ -327,7 +333,7 @@ def auth_verify(token: str = Query(...)):
             cur.execute(
                 "INSERT INTO app.users (email, last_login_at) VALUES (%s, NOW()) "
                 "ON CONFLICT (email) DO UPDATE SET last_login_at = NOW() "
-                "RETURNING user_id, email, username",
+                "RETURNING user_id, email, username, is_dev",
                 [email],
             )
             user = cur.fetchone()
@@ -339,6 +345,7 @@ def auth_verify(token: str = Query(...)):
         "user_id": user["user_id"],
         "email": user["email"],
         "username": username,
+        "is_dev": bool(user.get("is_dev")),
         "expires_in": SESSION_TTL,
     }
 
@@ -372,7 +379,7 @@ def auth_password(req: PasswordLoginRequest):
             if not user:
                 cur.execute(
                     "INSERT INTO app.users (email, password_hash, last_login_at) "
-                    "VALUES (%s, %s, NOW()) RETURNING user_id, email, username",
+                    "VALUES (%s, %s, NOW()) RETURNING user_id, email, username, is_dev",
                     [email, password_hash],
                 )
                 user = cur.fetchone()
@@ -381,7 +388,7 @@ def auth_password(req: PasswordLoginRequest):
             elif not user.get("password_hash"):
                 cur.execute(
                     "UPDATE app.users SET password_hash = %s, last_login_at = NOW() "
-                    "WHERE user_id = %s RETURNING user_id, email, username",
+                    "WHERE user_id = %s RETURNING user_id, email, username, is_dev",
                     [password_hash, user["user_id"]],
                 )
                 user = cur.fetchone()
@@ -391,7 +398,7 @@ def auth_password(req: PasswordLoginRequest):
                     raise HTTPException(status_code=401, detail="Email or password is incorrect")
                 cur.execute(
                     "UPDATE app.users SET last_login_at = NOW() "
-                    "WHERE user_id = %s RETURNING user_id, email, username",
+                    "WHERE user_id = %s RETURNING user_id, email, username, is_dev",
                     [user["user_id"]],
                 )
                 user = cur.fetchone()
@@ -404,6 +411,7 @@ def auth_password(req: PasswordLoginRequest):
         "user_id": user["user_id"],
         "email": user["email"],
         "username": username,
+        "is_dev": bool(user.get("is_dev")),
         "expires_in": SESSION_TTL,
         "created": created,
         "password_set": password_set,
@@ -441,11 +449,11 @@ def auth_set_username(req: UsernameRequest, user: dict = Depends(_current_user))
             if cur.fetchone():
                 return JSONResponse(status_code=409, content={"error": "Username is already taken"})
             cur.execute(
-                "UPDATE app.users SET username = %s WHERE user_id = %s RETURNING user_id, email, username",
+                "UPDATE app.users SET username = %s WHERE user_id = %s RETURNING user_id, email, username, is_dev",
                 [username, user["user_id"]],
             )
             row = cur.fetchone()
-    return {"user_id": row["user_id"], "email": row["email"], "username": row["username"]}
+    return {"user_id": row["user_id"], "email": row["email"], "username": row["username"], "is_dev": bool(row.get("is_dev"))}
 
 
 @router.get("/auth/me")
@@ -455,6 +463,7 @@ def auth_me(user: dict = Depends(_current_user)):
         "user_id": user["user_id"],
         "email": user["email"],
         "username": user.get("username"),
+        "is_dev": bool(user.get("is_dev")),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
         "last_login_at": user["last_login_at"].isoformat() if user.get("last_login_at") else None,
     }

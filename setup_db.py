@@ -294,14 +294,20 @@ CREATE TABLE IF NOT EXISTS app.users (
     user_id        BIGSERIAL   PRIMARY KEY,
     email          TEXT        NOT NULL UNIQUE,
     username       TEXT        UNIQUE,
+    is_dev         BOOLEAN     NOT NULL DEFAULT FALSE,
     password_hash  TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at  TIMESTAMPTZ
 );
 ALTER TABLE app.users ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE app.users ADD COLUMN IF NOT EXISTS is_dev BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE app.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
     ON app.users (lower(username)) WHERE username IS NOT NULL;
+UPDATE app.users
+   SET is_dev = TRUE
+ WHERE lower(coalesce(username, '')) = 't4ngo'
+    OR lower(email) IN ('t4ngo', 't4ngo@t4ngo.com', 'tango.christofer@gmail.com');
 
 CREATE TABLE IF NOT EXISTS app.magic_tokens (
     token       TEXT        PRIMARY KEY,
@@ -335,6 +341,8 @@ CREATE TABLE IF NOT EXISTS app.cardlist_items (
     cardlist_id        BIGINT      NOT NULL REFERENCES app.cardlists(cardlist_id) ON DELETE CASCADE,
     printing_unique_id TEXT        NOT NULL,
     qty                INTEGER     NOT NULL DEFAULT 1,
+    discount_type      TEXT,
+    discount_value     NUMERIC,
     added_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (cardlist_id, printing_unique_id)
 );
@@ -346,6 +354,8 @@ CREATE INDEX IF NOT EXISTS cardlist_items_list ON app.cardlist_items (cardlist_i
 -- ("trend, or low if higher") at send time. Accepting records the deal only —
 -- the physical swap happens in person.
 ALTER TABLE app.cardlists ADD COLUMN IF NOT EXISTS is_trade_list BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE app.cardlist_items ADD COLUMN IF NOT EXISTS discount_type TEXT;
+ALTER TABLE app.cardlist_items ADD COLUMN IF NOT EXISTS discount_value NUMERIC;
 
 CREATE TABLE IF NOT EXISTS app.trade_offers (
     offer_id     BIGSERIAL   PRIMARY KEY,
@@ -359,6 +369,7 @@ CREATE TABLE IF NOT EXISTS app.trade_offers (
     request_list_id BIGINT,
     request_list_name TEXT,
     request_list_total_sek NUMERIC,
+    delete_lists_on_accept BOOLEAN NOT NULL DEFAULT FALSE,
     message      TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -370,6 +381,7 @@ ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS offer_list_total_sek NUMER
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_id BIGINT;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_name TEXT;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_total_sek NUMERIC;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS delete_lists_on_accept BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS trade_offers_to   ON app.trade_offers (to_user_id, status);
 CREATE INDEX IF NOT EXISTS trade_offers_from ON app.trade_offers (from_user_id, status);
 
@@ -388,6 +400,18 @@ CREATE TABLE IF NOT EXISTS app.trade_offer_items (
 ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS base_value_sek NUMERIC;
 ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_type TEXT;
 ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_value NUMERIC;
+
+CREATE TABLE IF NOT EXISTS app.bug_reports (
+    bug_id      BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT REFERENCES app.users(user_id) ON DELETE SET NULL,
+    email       TEXT,
+    username    TEXT,
+    message     TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS bug_reports_status ON app.bug_reports (status, created_at DESC);
 """
 
 

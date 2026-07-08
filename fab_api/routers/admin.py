@@ -2,16 +2,208 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from fab_api.core import get_conn
+from fab_api.routers.auth import _clean_username, _current_user, ensure_app_auth_schema
 
 router = APIRouter()
 
 
+BUG_REPORT_SCHEMA_SQL = """
+CREATE SCHEMA IF NOT EXISTS app;
+CREATE TABLE IF NOT EXISTS app.bug_reports (
+    bug_id      BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT REFERENCES app.users(user_id) ON DELETE SET NULL,
+    email       TEXT,
+    username    TEXT,
+    message     TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS bug_reports_status ON app.bug_reports (status, created_at DESC);
+"""
+
+
+class AdminUserUpdate(BaseModel):
+    username: Optional[str] = None
+    is_dev: Optional[bool] = None
+
+
+class BugReportCreate(BaseModel):
+    message: str
+
+
+class BugReportUpdate(BaseModel):
+    status: str
+
+
+def ensure_admin_schema():
+    ensure_app_auth_schema()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(BUG_REPORT_SCHEMA_SQL)
+
+
+def _require_dev(user: dict = Depends(_current_user)) -> dict:
+    if not user.get("is_dev"):
+        raise HTTPException(status_code=403, detail="Dev account required")
+    return user
+
+
+def _optional_user(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    if not authorization:
+        return None
+    try:
+        return _current_user(authorization)
+    except HTTPException:
+        return None
+
+
+@router.post("/bug-reports")
+def create_bug_report(req: BugReportCreate, user: Optional[dict] = Depends(_optional_user)):
+    ensure_admin_schema()
+    message = (req.message or "").strip()[:3000]
+    if len(message) < 3:
+        return JSONResponse(status_code=400, content={"error": "Write a short bug description"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app.bug_reports (user_id, email, username, message)
+                VALUES (%s, %s, %s, %s)
+                RETURNING bug_id, created_at
+                """,
+                [
+                    user.get("user_id") if user else None,
+                    user.get("email") if user else None,
+                    user.get("username") if user else None,
+                    message,
+                ],
+            )
+            row = cur.fetchone()
+    return {"ok": True, "bug_id": row["bug_id"], "created_at": row["created_at"].isoformat()}
+
+
+@router.get("/admin/users", dependencies=[Depends(_require_dev)])
+def admin_users(q: Optional[str] = Query(None), page_size: int = Query(100, ge=1, le=300)):
+    ensure_admin_schema()
+    where = []
+    params: list = []
+    if q and q.strip():
+        where.append("(email ILIKE %s OR username ILIKE %s)")
+        needle = f"%{q.strip()}%"
+        params += [needle, needle]
+    sql = """
+        SELECT user_id, email, username, is_dev, created_at, last_login_at
+        FROM app.users
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(page_size)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    return [{
+        "user_id": r["user_id"],
+        "email": r["email"],
+        "username": r["username"],
+        "is_dev": bool(r["is_dev"]),
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
+    } for r in rows]
+
+
+@router.patch("/admin/users/{user_id}", dependencies=[Depends(_require_dev)])
+def admin_update_user(user_id: int, req: AdminUserUpdate):
+    ensure_admin_schema()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            if req.username is not None:
+                username = _clean_username(req.username)
+                if not username:
+                    return JSONResponse(status_code=400, content={"error": "Username must be 3-32 letters, numbers, _ or -"})
+                cur.execute(
+                    "SELECT 1 FROM app.users WHERE lower(username) = lower(%s) AND user_id <> %s",
+                    [username, user_id],
+                )
+                if cur.fetchone():
+                    return JSONResponse(status_code=409, content={"error": "Username is already taken"})
+                cur.execute("UPDATE app.users SET username = %s WHERE user_id = %s", [username, user_id])
+            if req.is_dev is not None:
+                cur.execute("UPDATE app.users SET is_dev = %s WHERE user_id = %s", [req.is_dev, user_id])
+            cur.execute(
+                "SELECT user_id, email, username, is_dev, created_at, last_login_at FROM app.users WHERE user_id = %s",
+                [user_id],
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "user_id": row["user_id"],
+        "email": row["email"],
+        "username": row["username"],
+        "is_dev": bool(row["is_dev"]),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "last_login_at": row["last_login_at"].isoformat() if row["last_login_at"] else None,
+    }
+
+
+@router.get("/admin/bug-reports", dependencies=[Depends(_require_dev)])
+def admin_bug_reports(status: Optional[str] = Query(None), page_size: int = Query(100, ge=1, le=300)):
+    ensure_admin_schema()
+    where = []
+    params: list = []
+    if status and status != "all":
+        where.append("status = %s")
+        params.append(status)
+    sql = "SELECT * FROM app.bug_reports"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(page_size)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    return [{
+        "bug_id": r["bug_id"],
+        "user_id": r["user_id"],
+        "email": r["email"],
+        "username": r["username"],
+        "message": r["message"],
+        "status": r["status"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+    } for r in rows]
+
+
+@router.patch("/admin/bug-reports/{bug_id}", dependencies=[Depends(_require_dev)])
+def admin_update_bug_report(bug_id: int, req: BugReportUpdate):
+    ensure_admin_schema()
+    status = (req.status or "").strip().lower()
+    if status not in ("open", "reviewing", "closed"):
+        return JSONResponse(status_code=400, content={"error": "status must be open, reviewing or closed"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE app.bug_reports SET status = %s, updated_at = NOW() WHERE bug_id = %s RETURNING bug_id, status",
+                [status, bug_id],
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Bug report not found")
+    return {"bug_id": row["bug_id"], "status": row["status"]}
+
+
 # ── /admin/unmatched ──────────────────────────────────────────────────────────
 
-@router.get("/admin/unmatched")
+@router.get("/admin/unmatched", dependencies=[Depends(_require_dev)])
 def get_unmatched(
     reason: Optional[str] = Query(None, description="'no_price' or 'no_match'"),
     page:   int           = Query(1, ge=1),
@@ -67,7 +259,7 @@ def get_unmatched(
 
 # ── /admin/price-discrepancies ────────────────────────────────────────────────
 
-@router.get("/admin/price-discrepancies")
+@router.get("/admin/price-discrepancies", dependencies=[Depends(_require_dev)])
 def get_price_discrepancies(
     tier:      int   = Query(0, ge=0, le=5,
                              description="Cardmarket match tier to audit "
@@ -147,7 +339,7 @@ def get_price_discrepancies(
 
 # ── /admin/sets ───────────────────────────────────────────────────────────────
 
-@router.get("/admin/sets")
+@router.get("/admin/sets", dependencies=[Depends(_require_dev)])
 def get_admin_sets():
     """Per-set price and data-quality breakdown for the admin panel."""
     sql = """
@@ -221,7 +413,7 @@ def get_admin_sets():
     return result
 
 
-@router.get("/admin/quality")
+@router.get("/admin/quality", dependencies=[Depends(_require_dev)])
 def get_admin_quality():
     """Overall data-quality counters for the admin panel."""
     sql = """
@@ -274,4 +466,3 @@ def get_admin_quality():
             cur.execute(sql)
             row = cur.fetchone()
     return dict(row)
-

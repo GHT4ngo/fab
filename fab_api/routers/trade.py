@@ -18,6 +18,8 @@ APP_TRADE_SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS app;
 
 ALTER TABLE app.cardlists ADD COLUMN IF NOT EXISTS is_trade_list BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE app.cardlist_items ADD COLUMN IF NOT EXISTS discount_type TEXT;
+ALTER TABLE app.cardlist_items ADD COLUMN IF NOT EXISTS discount_value NUMERIC;
 
 CREATE TABLE IF NOT EXISTS app.trade_offers (
     offer_id     BIGSERIAL   PRIMARY KEY,
@@ -31,6 +33,7 @@ CREATE TABLE IF NOT EXISTS app.trade_offers (
     request_list_id BIGINT,
     request_list_name TEXT,
     request_list_total_sek NUMERIC,
+    delete_lists_on_accept BOOLEAN NOT NULL DEFAULT FALSE,
     message      TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -42,6 +45,7 @@ ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS offer_list_total_sek NUMER
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_id BIGINT;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_name TEXT;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_total_sek NUMERIC;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS delete_lists_on_accept BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS trade_offers_to   ON app.trade_offers (to_user_id, status);
 CREATE INDEX IF NOT EXISTS trade_offers_from ON app.trade_offers (from_user_id, status);
 
@@ -93,15 +97,8 @@ class OfferCreate(BaseModel):
 class ListOfferCreate(BaseModel):
     offer_cardlist_id: int                # sender gives this list
     request_cardlist_id: int              # sender wants this list
-    message: Optional[str] = None
-
-
-class FastTradeCreate(BaseModel):
-    other_username: Optional[str] = None
-    you_label: str = "Your side"
-    them_label: str = "Their side"
-    you_total_sek: float = 0
-    them_total_sek: float = 0
+    to_username: Optional[str] = None
+    delete_lists_on_accept: bool = False
     message: Optional[str] = None
 
 
@@ -139,11 +136,15 @@ def trade_listings(
         SELECT
             i.printing_unique_id, i.qty,
             l.cardlist_id, l.name AS list_name,
-            u.user_id AS owner_id, u.email AS owner_email,
+            u.user_id AS owner_id, u.email AS owner_email, u.username AS owner_username,
             g.name, g.display_id, g.set_id,
             coalesce(s.set_name, g.set_id) AS set_name,
             g.edition, g.foiling, g.is_foil, g.rarity, g.pitch, g.image_url,
-            g.trade_value_sek,
+            GREATEST(0, CASE
+                WHEN i.discount_type = 'pct' THEN COALESCE(g.trade_value_sek, 0) * (1 - LEAST(COALESCE(i.discount_value, 0), 100) / 100)
+                WHEN i.discount_type = 'sek' THEN COALESCE(g.trade_value_sek, 0) - COALESCE(i.discount_value, 0)
+                ELSE COALESCE(g.trade_value_sek, 0)
+            END) AS trade_value_sek,
             COUNT(*) OVER() AS total_count
         FROM app.cardlist_items i
         JOIN app.cardlists l ON l.cardlist_id = i.cardlist_id
@@ -151,7 +152,7 @@ def trade_listings(
         JOIN gold.gold_cards g ON g.printing_unique_id = i.printing_unique_id
         LEFT JOIN bronze.fab_sets s ON s.set_id = g.set_id AND s.edition = g.edition
         WHERE {' AND '.join(where)}
-        ORDER BY g.name, g.set_id, u.email
+        ORDER BY l.updated_at DESC, g.name, g.set_id, u.email
         LIMIT %s OFFSET %s
     """
     params += [page_size, offset]
@@ -173,6 +174,7 @@ def trade_listings(
 @router.get("/trade/lists")
 def trade_lists(
     owner_id: Optional[int] = Query(None, description="Only public trade lists from this user"),
+    q: Optional[str] = Query(None, description="List name, username, email, or card name search"),
 ):
     """Public trade-flagged lists, snapshotted by total trade value. Used for
     list-for-list offers; list ids may later be deleted without losing offer history."""
@@ -182,21 +184,35 @@ def trade_lists(
     if owner_id is not None:
         where.append("u.user_id = %s")
         params.append(owner_id)
+    if q and q.strip():
+        needle = f"%{q.strip()}%"
+        where.append(
+            "(l.name ILIKE %s OR u.username ILIKE %s OR u.email ILIKE %s "
+            "OR EXISTS (SELECT 1 FROM app.cardlist_items si JOIN gold.gold_cards sg "
+            "ON sg.printing_unique_id = si.printing_unique_id "
+            "WHERE si.cardlist_id = l.cardlist_id AND sg.name ILIKE %s))"
+        )
+        params += [needle, needle, needle, needle]
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT
-                    l.cardlist_id, l.name, u.user_id AS owner_id, u.email AS owner_email,
+                    l.cardlist_id, l.name, l.created_at, l.updated_at,
+                    u.user_id AS owner_id, u.email AS owner_email, u.username AS owner_username,
                     COALESCE(SUM(i.qty), 0) AS item_count,
-                    COALESCE(SUM(i.qty * COALESCE(g.trade_value_sek, 0)), 0) AS total_sek
+                    COALESCE(SUM(i.qty * GREATEST(0, CASE
+                        WHEN i.discount_type = 'pct' THEN COALESCE(g.trade_value_sek, 0) * (1 - LEAST(COALESCE(i.discount_value, 0), 100) / 100)
+                        WHEN i.discount_type = 'sek' THEN COALESCE(g.trade_value_sek, 0) - COALESCE(i.discount_value, 0)
+                        ELSE COALESCE(g.trade_value_sek, 0)
+                    END)), 0) AS total_sek
                 FROM app.cardlists l
                 JOIN app.users u ON u.user_id = l.user_id
                 LEFT JOIN app.cardlist_items i ON i.cardlist_id = l.cardlist_id
                 LEFT JOIN gold.gold_cards g ON g.printing_unique_id = i.printing_unique_id
                 WHERE {' AND '.join(where)}
-                GROUP BY l.cardlist_id, u.user_id, u.email
-                ORDER BY u.email, l.name
+                GROUP BY l.cardlist_id, u.user_id, u.email, u.username
+                ORDER BY l.updated_at DESC, l.created_at DESC
                 """,
                 params,
             )
@@ -206,6 +222,9 @@ def trade_lists(
         "name": r["name"],
         "owner_id": r["owner_id"],
         "owner_email": r["owner_email"],
+        "owner_username": r["owner_username"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
         "item_count": int(r["item_count"]),
         "total_sek": int(r["total_sek"]),
     } for r in rows]
@@ -244,7 +263,7 @@ def _snapshot_cardlist(cur, cardlist_id: int, *, side: str, current_user_id: int
     another user's public trade list."""
     cur.execute(
         """
-        SELECT l.cardlist_id, l.name, l.user_id, l.is_trade_list, u.email AS owner_email
+        SELECT l.cardlist_id, l.name, l.user_id, l.is_trade_list, u.email AS owner_email, u.username AS owner_username
         FROM app.cardlists l
         JOIN app.users u ON u.user_id = l.user_id
         WHERE l.cardlist_id = %s
@@ -261,7 +280,14 @@ def _snapshot_cardlist(cur, cardlist_id: int, *, side: str, current_user_id: int
 
     cur.execute(
         """
-        SELECT i.printing_unique_id, i.qty, g.trade_value_sek
+        SELECT
+            i.printing_unique_id, i.qty, i.discount_type, i.discount_value,
+            g.trade_value_sek,
+            GREATEST(0, CASE
+                WHEN i.discount_type = 'pct' THEN COALESCE(g.trade_value_sek, 0) * (1 - LEAST(COALESCE(i.discount_value, 0), 100) / 100)
+                WHEN i.discount_type = 'sek' THEN COALESCE(g.trade_value_sek, 0) - COALESCE(i.discount_value, 0)
+                ELSE COALESCE(g.trade_value_sek, 0)
+            END) AS effective_value_sek
         FROM app.cardlist_items i
         JOIN gold.gold_cards g ON g.printing_unique_id = i.printing_unique_id
         WHERE i.cardlist_id = %s
@@ -273,10 +299,13 @@ def _snapshot_cardlist(cur, cardlist_id: int, *, side: str, current_user_id: int
     items = []
     total = 0.0
     for r in rows:
-        val = float(r["trade_value_sek"]) if r["trade_value_sek"] is not None else None
+        base_val = float(r["trade_value_sek"]) if r["trade_value_sek"] is not None else None
+        val = float(r["effective_value_sek"]) if r["effective_value_sek"] is not None else None
         if val is not None:
             total += val * r["qty"]
-        items.append((r["printing_unique_id"], r["qty"], val))
+        discount_type = (r.get("discount_type") or "none").lower()
+        discount_value = float(r["discount_value"]) if r.get("discount_value") is not None else 0
+        items.append((r["printing_unique_id"], r["qty"], base_val, val, discount_type, discount_value))
     if not items:
         raise HTTPException(status_code=400, detail=f"List is empty: {lst['name']}")
     return {
@@ -284,6 +313,7 @@ def _snapshot_cardlist(cur, cardlist_id: int, *, side: str, current_user_id: int
         "name": lst["name"],
         "owner_id": lst["user_id"],
         "owner_email": lst["owner_email"],
+        "owner_username": lst["owner_username"],
         "items": items,
         "total": total,
     }
@@ -319,11 +349,6 @@ def _offer_dict(cur, offer_row: dict) -> dict:
         if d["current_value_sek"] is not None:
             current_totals[d["side"]] += d["current_value_sek"] * d["qty"]
         items.append(d)
-    if not items and offer_row.get("kind") == "fast":
-        totals["offer"] = float(offer_row.get("offer_list_total_sek") or 0)
-        totals["request"] = float(offer_row.get("request_list_total_sek") or 0)
-        current_totals["offer"] = totals["offer"]
-        current_totals["request"] = totals["request"]
     return {
         "offer_id": offer_row["offer_id"],
         "kind": offer_row.get("kind") or "cards",
@@ -331,7 +356,10 @@ def _offer_dict(cur, offer_row: dict) -> dict:
         "from_email": offer_row["from_email"],
         "to_user_id": offer_row["to_user_id"],
         "to_email": offer_row["to_email"],
+        "from_username": offer_row.get("from_username"),
+        "to_username": offer_row.get("to_username"),
         "status": offer_row["status"],
+        "delete_lists_on_accept": bool(offer_row.get("delete_lists_on_accept")),
         "message": offer_row["message"],
         "created_at": offer_row["created_at"].isoformat() if offer_row["created_at"] else None,
         "updated_at": offer_row["updated_at"].isoformat() if offer_row["updated_at"] else None,
@@ -354,7 +382,8 @@ def _offer_dict(cur, offer_row: dict) -> dict:
 
 
 _OFFER_BASE_SQL = """
-    SELECT o.*, fu.email AS from_email, tu.email AS to_email
+    SELECT o.*, fu.email AS from_email, fu.username AS from_username,
+           tu.email AS to_email, tu.username AS to_username
     FROM app.trade_offers o
     JOIN app.users fu ON fu.user_id = o.from_user_id
     JOIN app.users tu ON tu.user_id = o.to_user_id
@@ -485,6 +514,15 @@ def trade_list_offer_create(req: ListOfferCreate, user: dict = Depends(_current_
             want = _snapshot_cardlist(cur, req.request_cardlist_id, side="request", current_user_id=user["user_id"])
 
             to_user_id = want["owner_id"]
+            to_username = (req.to_username or "").strip()
+            if to_username:
+                cur.execute(
+                    "SELECT user_id FROM app.users WHERE lower(username) = lower(%s)",
+                    [to_username],
+                )
+                target = cur.fetchone()
+                if target:
+                    to_user_id = target["user_id"]
             if to_user_id == user["user_id"] and give["cardlist_id"] == want["cardlist_id"]:
                 return JSONResponse(status_code=400, content={"error": "Pick two different lists"})
 
@@ -493,76 +531,36 @@ def trade_list_offer_create(req: ListOfferCreate, user: dict = Depends(_current_
                 INSERT INTO app.trade_offers (
                     from_user_id, to_user_id, kind, message,
                     offer_list_id, offer_list_name, offer_list_total_sek,
-                    request_list_id, request_list_name, request_list_total_sek
+                    request_list_id, request_list_name, request_list_total_sek,
+                    delete_lists_on_accept
                 )
-                VALUES (%s, %s, 'list', %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, 'list', %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING offer_id
                 """,
                 [
                     user["user_id"], to_user_id, message,
                     give["cardlist_id"], give["name"], give["total"],
                     want["cardlist_id"], want["name"], want["total"],
+                    req.delete_lists_on_accept,
                 ],
             )
             offer_id = cur.fetchone()["offer_id"]
             for side, rows in (("offer", give["items"]), ("request", want["items"])):
-                for pid, qty, val in rows:
+                for pid, qty, base_val, val, discount_type, discount_value in rows:
                     cur.execute(
                         """
                         INSERT INTO app.trade_offer_items
                             (offer_id, side, printing_unique_id, qty, base_value_sek, value_sek, discount_type, discount_value)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'none', 0)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (offer_id, side, printing_unique_id)
                         DO UPDATE SET qty = app.trade_offer_items.qty + EXCLUDED.qty
                         """,
-                        [offer_id, side, pid, qty, val, val],
+                        [offer_id, side, pid, qty, base_val, val, discount_type, discount_value],
                     )
             cur.execute(_OFFER_BASE_SQL + " WHERE o.offer_id = %s", [offer_id])
             result = _offer_dict(cur, dict(cur.fetchone()))
     if result["to_user_id"] != result["from_user_id"]:
         _notify_offer(result, "created")
-    return result
-
-
-@router.post("/trade/fast")
-def trade_fast_create(req: FastTradeCreate, user: dict = Depends(_current_user)):
-    """Record a completed one-unit trade. If other_username matches an existing
-    account, the record is shared with that user's trade history. Otherwise it is
-    stored only on the current user's account."""
-    ensure_app_trade_schema()
-    you_label = (req.you_label or "Your side").strip()[:120]
-    them_label = (req.them_label or "Their side").strip()[:120]
-    message = (req.message or "").strip()[:1000] or None
-    you_total = max(0.0, float(req.you_total_sek or 0))
-    them_total = max(0.0, float(req.them_total_sek or 0))
-    other_username = (req.other_username or "").strip()
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            to_user_id = user["user_id"]
-            if other_username:
-                cur.execute(
-                    "SELECT user_id FROM app.users WHERE lower(username) = lower(%s)",
-                    [other_username],
-                )
-                row = cur.fetchone()
-                if row:
-                    to_user_id = row["user_id"]
-            cur.execute(
-                """
-                INSERT INTO app.trade_offers (
-                    from_user_id, to_user_id, status, kind, message,
-                    offer_list_name, offer_list_total_sek,
-                    request_list_name, request_list_total_sek
-                )
-                VALUES (%s, %s, 'accepted', 'fast', %s, %s, %s, %s, %s)
-                RETURNING offer_id
-                """,
-                [user["user_id"], to_user_id, message, you_label, you_total, them_label, them_total],
-            )
-            offer_id = cur.fetchone()["offer_id"]
-            cur.execute(_OFFER_BASE_SQL + " WHERE o.offer_id = %s", [offer_id])
-            result = _offer_dict(cur, dict(cur.fetchone()))
     return result
 
 
@@ -573,7 +571,7 @@ def trade_offers_list(user: dict = Depends(_current_user)):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                _OFFER_BASE_SQL + " WHERE o.from_user_id = %s OR o.to_user_id = %s "
+                _OFFER_BASE_SQL + " WHERE (o.from_user_id = %s OR o.to_user_id = %s) AND o.kind <> 'fast' "
                 "ORDER BY o.created_at DESC LIMIT 200",
                 [user["user_id"], user["user_id"]],
             )
@@ -610,6 +608,15 @@ def trade_offer_act(offer_id: int, req: OfferAction, user: dict = Depends(_curre
                 "UPDATE app.trade_offers SET status = %s, updated_at = NOW() WHERE offer_id = %s",
                 [new_status, offer_id],
             )
+            if new_status == "accepted" and offer.get("kind") == "list" and offer.get("delete_lists_on_accept"):
+                cur.execute(
+                    "DELETE FROM app.cardlists WHERE cardlist_id = %s AND user_id = %s",
+                    [offer.get("offer_list_id"), offer["from_user_id"]],
+                )
+                cur.execute(
+                    "DELETE FROM app.cardlists WHERE cardlist_id = %s AND user_id = %s",
+                    [offer.get("request_list_id"), offer["to_user_id"]],
+                )
             offer["status"] = new_status
             result = _offer_dict(cur, offer)
     # After commit: tell the sender their offer was accepted/declined (cancel is silent).
