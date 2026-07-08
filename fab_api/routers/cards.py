@@ -18,11 +18,14 @@ def get_cards(
     rarity:   Optional[str]   = Query(None, description="Rarity filter"),
     foiling:  Optional[str]   = Query(None, description="Foiling: S, R, C, G"),
     has_price: Optional[bool] = Query(None, description="Only cards with price"),
+    on_trade: Optional[bool]  = Query(None, description="Only cards on someone's trade list"),
+    trade_owner: Optional[str] = Query(None, description="Only cards on this username's trade lists"),
     page:     int             = Query(1,    ge=1),
     page_size: int            = Query(40,   ge=1, le=500),
 ):
     """
-    Browse cards. Returns paginated results with price in EUR, USD, SEK.
+    Browse cards. Returns paginated results with price in EUR, USD, SEK, plus
+    trade availability (copies on public trade lists + number of traders).
     """
     where = []
     params = []
@@ -43,6 +46,16 @@ def get_cards(
         where.append("g.has_price = true")
     elif has_price is False:
         where.append("g.has_price = false")
+    if on_trade is True:
+        where.append("COALESCE(tr.trade_qty, 0) > 0")
+    if trade_owner and trade_owner.strip():
+        where.append(
+            "EXISTS (SELECT 1 FROM app.cardlist_items ti "
+            "JOIN app.cardlists tl ON tl.cardlist_id = ti.cardlist_id AND tl.is_trade_list "
+            "JOIN app.users tu ON tu.user_id = tl.user_id "
+            "WHERE ti.printing_unique_id = g.printing_unique_id AND lower(tu.username) = lower(%s))"
+        )
+        params.append(trade_owner.strip())
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     offset = (page - 1) * page_size
@@ -85,10 +98,20 @@ def get_cards(
             g.price_confidence,
             g.is_foil,
             g.has_price,
+            COALESCE(tr.trade_qty, 0)     AS trade_qty,
+            COALESCE(tr.trade_sellers, 0) AS trade_sellers,
             COUNT(*) OVER() AS total_count
         FROM gold.gold_cards g
         LEFT JOIN bronze.fab_sets s
             ON s.set_id = g.set_id AND s.edition = g.edition
+        LEFT JOIN (
+            SELECT i.printing_unique_id,
+                   SUM(i.qty)               AS trade_qty,
+                   COUNT(DISTINCT l.user_id) AS trade_sellers
+            FROM app.cardlist_items i
+            JOIN app.cardlists l ON l.cardlist_id = i.cardlist_id AND l.is_trade_list
+            GROUP BY i.printing_unique_id
+        ) tr ON tr.printing_unique_id = g.printing_unique_id
         {where_sql}
         ORDER BY g.name, g.set_id, g.edition, g.foiling
         LIMIT %s OFFSET %s
@@ -110,6 +133,8 @@ def get_cards(
         c["price_eur_sek"]  = int(c["price_eur_sek"])    if c["price_eur_sek"] else None
         c["price_usd_sek"]  = int(c["price_usd_sek"])    if c["price_usd_sek"] else None
         c["tcg_fetched_at"] = c["tcg_fetched_at"].isoformat() if c["tcg_fetched_at"] else None
+        c["trade_qty"]      = int(c["trade_qty"])
+        c["trade_sellers"]  = int(c["trade_sellers"])
 
     return {
         "total": total,

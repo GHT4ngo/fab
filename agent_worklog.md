@@ -6,6 +6,62 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-08 — Trade negotiation with card locking, per-seller carts, direct messages
+
+User asked for a failproof + friendly trade flow. Built end-to-end (backend verified by a
+35-check scripted flow on :8011 with temp users, then deployed):
+
+- **Card locking (`app.trade_locks`)**: creating an offer RE-CHECKS every requested card
+  against the counterparty's live trade lists and reserves the copies. Availability =
+  listed qty − locks held by active (pending/accepted) offers. Race-proofed with
+  `pg_advisory_xact_lock(874201, owner_id)` per owner inside the transaction. Shortfall →
+  409 with per-card breakdown (`{unavailable: [{name, wanted, available}]}`), surfaced
+  verbatim in the UI toast. The giver's own cards are SOFT-locked (whatever is publicly
+  listed can't be double-promised; unlisted give-cards aren't required to be on a list).
+- **Negotiation state machine**: `awaiting_user_id` tracks whose turn it is.
+  `PATCH /trade/offers/{id}` actions: accept/decline/counter (on-turn user only, pending
+  only), cancel (the NOT-on-turn party while pending, either party after accept),
+  complete (accepted only). counter takes `add_items[{side,printing,qty}]` — snapshots
+  values, strict-locks the other party's cards, flips the turn → the other side must
+  accept again (exactly the user's spec). decline/cancel/complete release locks; accept
+  keeps them (trade is live, cards spoken for until completed). `accepted_at`/`completed_at`
+  timestamps; new `completed` status. Emails: created → recipient, countered → new on-turn
+  party, accepted/declined → the waiting party (accepted mail says meet at an LGS);
+  cancel/complete silent.
+- **Money-only + multi-list trades**: card offers already allowed an empty give side
+  (= cash buy); `/trade/list-offers` now takes `offer_cardlist_ids[]` /
+  `request_cardlist_ids[]` (old single fields still accepted) — several lists per side,
+  either side may be empty (empty receive = selling for money, needs `to_username`;
+  request lists must all share one owner). Snapshots into new `app.trade_offer_lists`;
+  legacy `offer_list_*` columns still populated ("A + B" joined names).
+- **Browse integration**: `/cards` now returns `trade_qty`/`trade_sellers` (LEFT JOIN over
+  trade-flagged list items) + `on_trade=true` and `trade_owner=<username>` filters. New
+  public `GET /trade/traders` (dropdown feed) and `GET /trade/availability/{printing}`
+  (per-seller qty/locked/available/value). Frontend: ⇄ badge on group tiles + printing
+  tiles, "For trade" toggle + trader select in FilterBar, per-seller panel in the card
+  detail modal with Add-to-cart + message buttons.
+- **Per-seller trade carts** (`lib/tradeCart.ts`, localStorage): a cart holds cards from
+  ONE seller only (enforced by construction — carts are keyed by seller). Cart panel on
+  /trade → "Request trade" posts a request-only offer (server re-checks + locks).
+- **Direct messages**: new `app.messages` + `fab_api/routers/messages.py`
+  (POST /messages, GET /messages/threads, /messages/with/{id} — marks read,
+  /messages/unread-count). Email nudge only for the FIRST unread message from a sender
+  (burst guard, checked before insert). Frontend: /messages page (thread list + chat,
+  10-20s polling, deep-link `?to=<id>&name=`), nav item with unread badge (30s poll),
+  Message buttons on offers + availability panel.
+- **Trade page rework**: carts panel, multi-select list-trade builder (checkbox rows,
+  same-owner guard mirrored client-side), listings show available/locked (Lock icon,
+  reserved cards disabled), offers inbox shows "your turn"/"waiting for X" chips, filters
+  All/Your turn/Waiting/Live/Closed, CounterPanel (chips from the other party's trade
+  lists), accepted state shows the meet-up-at-LGS banner + Mark completed / Call off.
+- Schema in BOTH `setup_db.py` (canonical) and router self-migrations, as always.
+- Verified: full pytest-style scripted flow (locks, 409 + breakdown, turn enforcement
+  403s, counter → re-accept, complete releases locks, multi-list snapshot, sell-needs-
+  recipient 400, message burst guard, unread/read transitions) — ALL PASSED; temp users
+  cleaned up (cascade). Vite build + tsc clean. Live checks on the domain after restart.
+
+---
+
 ## 2026-07-08 — Password login + saved device credentials
 
 - Added lightweight password auth beside the existing magic-link flow:

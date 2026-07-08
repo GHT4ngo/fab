@@ -27,7 +27,7 @@ sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.si
 ## API layout (split 2026-07-05)
 `api.py` is thin wiring only (middleware, include_router, static mount) — still run as
 `python api.py` / `uvicorn api:app`. Endpoints live in `fab_api/routers/`
-(`cards`, `admin`, `scan`, `auth`, `cardlists`, `tools`); shared env + the **pooled**
+(`cards`, `admin`, `scan`, `auth`, `cardlists`, `tools`, `trade`, `messages`); shared env + the **pooled**
 `get_conn()` context manager (ThreadedConnectionPool, commits on exit, returns conn to
 the pool) in `fab_api/core.py`; the OCR/visual scan engine — moved **verbatim**, logic
 untouched — in `fab_api/scan_engine.py`. GZip middleware compresses `/cards` (~11×);
@@ -211,21 +211,57 @@ schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
 - Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.tsx`
   (AuthProvider), `src/pages/Account.tsx`, `AddToListButton`, `SaveScanToListButton`.
 
-## Trading (Phase 4, DONE + live 2026-07-06)
+## Trading (Phase 4, live 2026-07-06; negotiation/locking rework 2026-07-08)
 - **Valuation rule (user-confirmed): `gold.trade_value_sek` = greatest(CM trend, CM low)
   EUR→SEK, tcgcsv USD→SEK fallback** ("trend price, or low if it's higher").
   `gold.cm_low_eur` also exposed. Computed in silver's final select.
 - A cardlist with `app.cardlists.is_trade_list = true` is a public trade list
   (toggle on Account; `PATCH /cardlists/{id}` takes `name` and/or `is_trade_list`).
-- `fab_api/routers/trade.py`: `GET /trade/listings` (public marketplace browse),
-  `POST /trade/offers` (give/want bundles, per-unit `value_sek` snapshotted at send
-  time), `GET /trade/offers` (mine, both directions), `PATCH /trade/offers/{id}`
-  (accept/decline = recipient only, cancel = sender only, pending-only else 409).
-  Accepting records the deal — the swap happens in person; no inventory moves.
-- Tables: `app.trade_offers`, `app.trade_offer_items` (setup_db.py canonical;
-  trade router self-migrates, incl. the `is_trade_list` ALTER).
-- Frontend `/trade` (Trading Post): listings table + search, offer builder (request
-  from their list / give from your cardlists, running totals + balance), offers inbox.
+- **Card locking (2026-07-08)**: creating an offer re-checks every requested card against
+  the counterparty's live trade lists and reserves the copies in `app.trade_locks`
+  (available = listed − locks from pending/accepted offers; race-guarded with
+  `pg_advisory_xact_lock(874201, owner_id)`). Shortfall → 409 with a per-card
+  `{unavailable:[…]}` breakdown (UI shows it verbatim). The giver's own listed cards are
+  soft-locked (give-cards do NOT have to be on a trade list). Locks release on
+  decline/cancel/complete and persist through accept (trade live = cards spoken for).
+- **Negotiation**: `awaiting_user_id` = whose turn. `PATCH /trade/offers/{id}` actions:
+  accept/decline/counter (on-turn user only, pending only), cancel (the not-on-turn party
+  while pending; either party after accept), complete (accepted only). `counter` takes
+  `add_items[{side,printing_unique_id,qty}]`, strict-locks the other party's cards and
+  flips the turn → the other side must accept again. Emails: created → recipient,
+  countered → new on-turn party, accepted/declined → the waiting party (accepted mail
+  suggests meeting at an LGS); cancel/complete silent.
+- **Money-only + multi-list**: one offer side may be empty (= cash buy/sale).
+  `POST /trade/list-offers` takes `offer_cardlist_ids[]`/`request_cardlist_ids[]`
+  (several per side; request lists must all share one owner; empty receive = sale and
+  needs `to_username`); snapshots into `app.trade_offer_lists` (legacy single-list
+  columns still filled, names joined "A + B").
+- Public endpoints: `GET /trade/listings` (+`locked_qty`/`available_qty` per row),
+  `GET /trade/traders`, `GET /trade/availability/{printing}` (per-seller
+  qty/locked/available/value), `GET /trade/lists`.
+- **Browse integration**: `/cards` returns `trade_qty`/`trade_sellers` + filters
+  `on_trade=true` and `trade_owner=<username>`. Frontend: ⇄ badges on tiles, "For trade"
+  toggle + trader dropdown in FilterBar, per-seller availability panel in the card
+  detail modal with add-to-cart + message buttons.
+- **Per-seller trade carts**: `retro-data-display/src/lib/tradeCart.ts` (localStorage;
+  one cart per seller, so a cart can only hold that user's cards). /trade shows the
+  carts; "Request trade" → request-only offer through the lock machinery.
+- Tables: `app.trade_offers` (+`awaiting_user_id`, `accepted_at`, `completed_at`),
+  `app.trade_offer_items`, `app.trade_offer_lists`, `app.trade_locks` (setup_db.py
+  canonical; trade router self-migrates, incl. the `is_trade_list` ALTER).
+- Frontend `/trade`: carts panel, multi-select list-trade builder, listings with
+  available/locked (reserved rows disabled), offer builder, trades inbox with
+  your-turn/waiting chips + filters (All/Your turn/Waiting/Live/Closed), CounterPanel,
+  accepted → meet-at-LGS banner + Mark completed / Call off, Message buttons.
+
+## Direct messages (2026-07-08)
+- `app.messages` + `fab_api/routers/messages.py`: `POST /messages` (to_user_id or
+  to_username), `GET /messages/threads`, `GET /messages/with/{id}` (marks incoming as
+  read), `GET /messages/unread-count`. Email nudge only for the FIRST unread message
+  from a sender (burst guard, checked before insert).
+- Frontend `/messages`: thread list + chat (10-20s polling), deep link
+  `/messages?to=<user_id>&name=<username>` (used from trade offers + the availability
+  panel), nav Messages item with unread badge (30s poll, signed-in only).
 
 ## Frontend design system (Phase 3, locked)
 `retro-data-display/src/index.css` is the **locked** system (Neurotech/Netrunner: deep

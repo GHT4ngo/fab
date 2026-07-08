@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from fab_api.core import HERE
-from fab_api.routers import admin, auth, cardlists, cards, scan, tools, trade
+from fab_api.routers import admin, auth, cardlists, cards, messages, scan, tools, trade
 
 app = FastAPI(title="FaB Store API", version="1.1.0")
 
@@ -36,6 +36,7 @@ app.include_router(auth.router)
 app.include_router(cardlists.router)
 app.include_router(tools.router)
 app.include_router(trade.router)
+app.include_router(messages.router)
 
 # ── Serve the built frontend ────────────────────────────────────────────────
 # Mounted last so it only catches paths not handled by an API route above.

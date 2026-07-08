@@ -382,6 +382,9 @@ ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_id BIGINT;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_name TEXT;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_total_sek NUMERIC;
 ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS delete_lists_on_accept BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS awaiting_user_id BIGINT;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS trade_offers_to   ON app.trade_offers (to_user_id, status);
 CREATE INDEX IF NOT EXISTS trade_offers_from ON app.trade_offers (from_user_id, status);
 
@@ -400,6 +403,42 @@ CREATE TABLE IF NOT EXISTS app.trade_offer_items (
 ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS base_value_sek NUMERIC;
 ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_type TEXT;
 ALTER TABLE app.trade_offer_items ADD COLUMN IF NOT EXISTS discount_value NUMERIC;
+
+-- Multi-list trades: one row per list snapshotted into an offer side.
+CREATE TABLE IF NOT EXISTS app.trade_offer_lists (
+    id          BIGSERIAL PRIMARY KEY,
+    offer_id    BIGINT    NOT NULL REFERENCES app.trade_offers(offer_id) ON DELETE CASCADE,
+    side        TEXT      NOT NULL,
+    cardlist_id BIGINT,
+    name        TEXT      NOT NULL,
+    total_sek   NUMERIC
+);
+CREATE INDEX IF NOT EXISTS trade_offer_lists_offer ON app.trade_offer_lists (offer_id);
+
+-- Card locks: copies reserved by an active (pending/accepted) offer. Availability
+-- for new offers = qty on trade lists − active locks; released on decline/cancel/complete.
+CREATE TABLE IF NOT EXISTS app.trade_locks (
+    lock_id            BIGSERIAL   PRIMARY KEY,
+    offer_id           BIGINT      NOT NULL REFERENCES app.trade_offers(offer_id) ON DELETE CASCADE,
+    owner_user_id      BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    printing_unique_id TEXT        NOT NULL,
+    qty                INTEGER     NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (offer_id, owner_user_id, printing_unique_id)
+);
+CREATE INDEX IF NOT EXISTS trade_locks_owner ON app.trade_locks (owner_user_id, printing_unique_id);
+
+-- User-to-user direct messages (threads = the user pair).
+CREATE TABLE IF NOT EXISTS app.messages (
+    message_id   BIGSERIAL   PRIMARY KEY,
+    from_user_id BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    to_user_id   BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    body         TEXT        NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    read_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS messages_to   ON app.messages (to_user_id, read_at);
+CREATE INDEX IF NOT EXISTS messages_pair ON app.messages (from_user_id, to_user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS app.bug_reports (
     bug_id      BIGSERIAL PRIMARY KEY,
@@ -477,7 +516,8 @@ def main():
     ok("app.scanned_cards / scan_sessions")
     ok("app.users / magic_tokens / sessions")
     ok("app.cardlists / cardlist_items")
-    ok("app.trade_offers / trade_offer_items")
+    ok("app.trade_offers / trade_offer_items / trade_offer_lists / trade_locks")
+    ok("app.messages")
     ok("extension: pg_trgm")
     cur.close()
     conn.close()
