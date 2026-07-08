@@ -1,6 +1,13 @@
-"""Passwordless magic-link auth. _current_user is the bearer-token dependency
-used by the cardlists router too."""
+"""Email auth. _current_user is the bearer-token dependency used by the
+cardlists router too.
 
+Magic links remain supported, and password login is intentionally lightweight:
+the product goal is easy personal collection access, not high-security custody.
+"""
+
+import base64
+import hashlib
+import hmac
 import os
 import secrets
 from typing import Optional
@@ -28,9 +35,11 @@ CREATE SCHEMA IF NOT EXISTS app;
 CREATE TABLE IF NOT EXISTS app.users (
     user_id        BIGSERIAL   PRIMARY KEY,
     email          TEXT        NOT NULL UNIQUE,
+    password_hash  TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at  TIMESTAMPTZ
 );
+ALTER TABLE app.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
 CREATE TABLE IF NOT EXISTS app.magic_tokens (
     token       TEXT        PRIMARY KEY,
@@ -72,6 +81,7 @@ CREATE INDEX IF NOT EXISTS cardlist_items_list ON app.cardlist_items (cardlist_i
 
 MAGIC_TOKEN_TTL = "15 minutes"   # how long a magic link is valid
 SESSION_TTL     = "30 days"      # how long a login session lasts
+PASSWORD_ITERATIONS = 160_000
 
 
 def ensure_app_auth_schema():
@@ -86,6 +96,48 @@ def _normalise_email(raw: str | None) -> str | None:
     if "@" not in email or "." not in email.split("@")[-1] or len(email) > 240:
         return None
     return email
+
+
+def _valid_password(raw: str | None) -> str | None:
+    password = raw or ""
+    if len(password) < 4 or len(password) > 200:
+        return None
+    return password
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return "pbkdf2_sha256${}${}${}".format(
+        PASSWORD_ITERATIONS,
+        base64.urlsafe_b64encode(salt).decode("ascii"),
+        base64.urlsafe_b64encode(digest).decode("ascii"),
+    )
+
+
+def _verify_password(password: str, stored: str | None) -> bool:
+    if not stored:
+        return False
+    try:
+        scheme, iterations, salt_b64, digest_b64 = stored.split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+        expected = base64.urlsafe_b64decode(digest_b64.encode("ascii"))
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(iterations))
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+def _mint_session(cur, user_id: int) -> str:
+    session_token = secrets.token_urlsafe(32)
+    cur.execute(
+        "INSERT INTO app.sessions (session_token, user_id, expires_at) "
+        "VALUES (%s, %s, NOW() + INTERVAL %s)",
+        [session_token, user_id, SESSION_TTL],
+    )
+    return session_token
 
 
 def _public_base_url() -> str:
@@ -172,6 +224,15 @@ class AuthRequest(BaseModel):
     email: str
 
 
+class PasswordLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class SetPasswordRequest(BaseModel):
+    password: str
+
+
 @router.post("/auth/request-link")
 def auth_request_link(req: AuthRequest):
     """Start passwordless login: mint a magic token for this email and 'send' the link.
@@ -233,18 +294,94 @@ def auth_verify(token: str = Query(...)):
             )
             user = cur.fetchone()
 
-            session_token = secrets.token_urlsafe(32)
-            cur.execute(
-                "INSERT INTO app.sessions (session_token, user_id, expires_at) "
-                "VALUES (%s, %s, NOW() + INTERVAL %s)",
-                [session_token, user["user_id"], SESSION_TTL],
-            )
+            session_token = _mint_session(cur, user["user_id"])
     return {
         "session_token": session_token,
         "user_id": user["user_id"],
         "email": user["email"],
         "expires_in": SESSION_TTL,
     }
+
+
+@router.post("/auth/password")
+def auth_password(req: PasswordLoginRequest):
+    """Sign in with email + password.
+
+    Usability rule: if the email has no account yet, create it. If the account
+    came from a magic link and has no password yet, set this password.
+    """
+    ensure_app_auth_schema()
+    email = _normalise_email(req.email)
+    password = _valid_password(req.password)
+    if not email:
+        return JSONResponse(status_code=400, content={"error": "Enter a valid email address"})
+    if not password:
+        return JSONResponse(status_code=400, content={"error": "Password must be 4-200 characters"})
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, email, password_hash FROM app.users WHERE email = %s",
+                [email],
+            )
+            user = cur.fetchone()
+            password_hash = _hash_password(password)
+            created = False
+            password_set = False
+
+            if not user:
+                cur.execute(
+                    "INSERT INTO app.users (email, password_hash, last_login_at) "
+                    "VALUES (%s, %s, NOW()) RETURNING user_id, email",
+                    [email, password_hash],
+                )
+                user = cur.fetchone()
+                created = True
+                password_set = True
+            elif not user.get("password_hash"):
+                cur.execute(
+                    "UPDATE app.users SET password_hash = %s, last_login_at = NOW() "
+                    "WHERE user_id = %s RETURNING user_id, email",
+                    [password_hash, user["user_id"]],
+                )
+                user = cur.fetchone()
+                password_set = True
+            else:
+                if not _verify_password(password, user["password_hash"]):
+                    raise HTTPException(status_code=401, detail="Email or password is incorrect")
+                cur.execute(
+                    "UPDATE app.users SET last_login_at = NOW() "
+                    "WHERE user_id = %s RETURNING user_id, email",
+                    [user["user_id"]],
+                )
+                user = cur.fetchone()
+
+            session_token = _mint_session(cur, user["user_id"])
+
+    return {
+        "session_token": session_token,
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "expires_in": SESSION_TTL,
+        "created": created,
+        "password_set": password_set,
+    }
+
+
+@router.post("/auth/set-password")
+def auth_set_password(req: SetPasswordRequest, user: dict = Depends(_current_user)):
+    """Set or replace the current user's password."""
+    ensure_app_auth_schema()
+    password = _valid_password(req.password)
+    if not password:
+        return JSONResponse(status_code=400, content={"error": "Password must be 4-200 characters"})
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE app.users SET password_hash = %s WHERE user_id = %s",
+                [_hash_password(password), user["user_id"]],
+            )
+    return {"ok": True}
 
 
 @router.get("/auth/me")

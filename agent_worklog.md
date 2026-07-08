@@ -6,6 +6,39 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-08 — Password login + saved device credentials
+
+- Added lightweight password auth beside the existing magic-link flow:
+  `POST /auth/password` creates/signs in/upgrades an email account with a PBKDF2-SHA256
+  password hash; `POST /auth/set-password` can replace the current user's password.
+- `app.users.password_hash` is now in both runtime self-migration
+  (`fab_api/routers/auth.py`) and canonical setup (`setup_db.py`).
+- Frontend Account sign-in now uses email + password, with a "Save email and password on
+  this device" checkbox backed by `localStorage`. Magic-link sign-in remains as fallback.
+- Verified: Python compile, Vite production build, API route responds on local `:8001`.
+- Product direction: next useful build step is to make Account the collection hub:
+  clearer inventory/list editing, a password/account settings panel, then tighten the
+  trade flow around selected trade lists and offer status.
+- Follow-up slice done: Account now shows inventory/value/trade-list summary cards,
+  password update + saved-device management, and inline list rename. Trade offers now
+  have inbox filters (needs action/sent/pending/closed), and `/trade/listings` accepts
+  `owner_id` so offer building can reliably load the counterparty's public trade cards.
+- List-for-list trading slice done:
+  - Backend `app.trade_offers` now stores `kind`, `offer_list_*`, and `request_list_*`
+    snapshot metadata, with runtime migration and `setup_db.py` canonical schema aligned.
+  - New `GET /trade/lists` returns public trade-flagged lists with owner, item count,
+    and total trade value.
+  - New `POST /trade/list-offers` snapshots one of your lists against your own or another
+    user's public trade list. It stores list names/totals and item rows so the trade remains
+    trackable even after source lists are deleted.
+  - Frontend Trade page has a "Trade full lists" panel with give/receive selects, visible
+    current difference before saving, and offer history displays saved list names, saved
+    difference, and current profit/loss from today's item values.
+  - Verified 2026-07-08: Python compile, Vite production build, API restart, and
+    `GET /trade/lists` smoke check. Caveat: no browser screenshot/manual UX pass yet.
+
+---
+
 ## 2026-07-07 — Coverage audit: priceless matches were blocking the cascade (`ffa7b9b`)
 
 User asked why ~879 printings had no price — "sorting error or discarded too early?"

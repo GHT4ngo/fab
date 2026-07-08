@@ -293,9 +293,11 @@ CREATE INDEX IF NOT EXISTS scanned_cards_display_id ON app.scanned_cards (displa
 CREATE TABLE IF NOT EXISTS app.users (
     user_id        BIGSERIAL   PRIMARY KEY,
     email          TEXT        NOT NULL UNIQUE,
+    password_hash  TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at  TIMESTAMPTZ
 );
+ALTER TABLE app.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
 CREATE TABLE IF NOT EXISTS app.magic_tokens (
     token       TEXT        PRIMARY KEY,
@@ -346,10 +348,24 @@ CREATE TABLE IF NOT EXISTS app.trade_offers (
     from_user_id BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
     to_user_id   BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
     status       TEXT        NOT NULL DEFAULT 'pending',
+    kind         TEXT        NOT NULL DEFAULT 'cards',
+    offer_list_id BIGINT,
+    offer_list_name TEXT,
+    offer_list_total_sek NUMERIC,
+    request_list_id BIGINT,
+    request_list_name TEXT,
+    request_list_total_sek NUMERIC,
     message      TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'cards';
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS offer_list_id BIGINT;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS offer_list_name TEXT;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS offer_list_total_sek NUMERIC;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_id BIGINT;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_name TEXT;
+ALTER TABLE app.trade_offers ADD COLUMN IF NOT EXISTS request_list_total_sek NUMERIC;
 CREATE INDEX IF NOT EXISTS trade_offers_to   ON app.trade_offers (to_user_id, status);
 CREATE INDEX IF NOT EXISTS trade_offers_from ON app.trade_offers (from_user_id, status);
 
