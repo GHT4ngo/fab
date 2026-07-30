@@ -27,7 +27,7 @@ sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.si
 ## API layout (split 2026-07-05)
 `api.py` is thin wiring only (middleware, include_router, static mount) — still run as
 `python api.py` / `uvicorn api:app`. Endpoints live in `fab_api/routers/`
-(`cards`, `admin`, `scan`, `auth`, `cardlists`, `tools`, `trade`, `messages`); shared env + the **pooled**
+(`cards`, `admin`, `scan`, `auth`, `cardlists`, `tools`, `trade`, `messages`, `buylist`); shared env + the **pooled**
 `get_conn()` context manager (ThreadedConnectionPool, commits on exit, returns conn to
 the pool) in `fab_api/core.py`; the OCR/visual scan engine — moved **verbatim**, logic
 untouched — in `fab_api/scan_engine.py`. GZip middleware compresses `/cards` (~11×);
@@ -253,6 +253,45 @@ schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
   available/locked (reserved rows disabled), offer builder, trades inbox with
   your-turn/waiting chips + filters (All/Your turn/Waiting/Live/Closed), CounterPanel,
   accepted → meet-at-LGS banner + Mark completed / Call off, Message buttons.
+
+## Buylist — "Sell to t4ngo" (2026-07-30)
+Users sell cards **to the store**; the store is one designated account —
+`lower(username)='t4ngo'`, override with `BUYLIST_STORE_USERNAME`, else the oldest
+`is_dev` user. Router `fab_api/routers/buylist.py`, tables in `setup_db.py` (canonical)
++ router self-migration.
+- **Rate card** (`app.buylist_settings`, one row per store): `enabled`, `base_pct`
+  (% of market), `min_card_sek`, `condition_pct` JSONB, `language_pct` JSONB, `notes`.
+  Defaults merge in at read time (NM 100 / LP 90 / MP 75 / HP 55 / DMG 30; EN 100,
+  others 70-90) so untouched keys still price sensibly.
+- **Rules** (`app.buylist_rules`, UNIQUE(user, field, value)): `field` ∈
+  {rarity, foiling, edition, set_id, condition, language}, `action` ∈ {block, pct}.
+  `block` = never buy (the user's "no commons, no gold foil, nothing from GEM/LGS");
+  `pct` multiplies the base rate for matching cards. Blocks always beat rates.
+  `gold.rarity` mixes short codes and long words for the same rarity → `_norm_rarity`
+  collapses them (`C`/`Common` → `common`) so ONE rule catches both spellings.
+- **Price** = `greatest(trade_value_sek, price_sek)` × base% × condition% × language%
+  × each matching pct rule, rounded to whole kr. Blocked / under-minimum / priceless
+  cards quote 0 with a printed reason. Same valuation basis as the trading post.
+- **Flow**: `POST /buylist/quote` (public, non-binding, `binding:false` + `notice`) →
+  `POST /buylist/offers` (auth; server RE-QUOTES, never trusts the client, and
+  snapshots the whole policy into `policy_snapshot`) → the store `counter`s
+  (per-line `offered_sek`/`qty`/`accepted`/`note` + message) or accepts.
+  `app.sell_offers.awaiting_user_id` is the turn, exactly like `trade_offers`:
+  accept/decline/counter = on-turn only; cancel = the NOT-on-turn party while open or
+  either party once accepted; complete = accepted only. Counter flips the turn so the
+  seller must accept again. Emails on submitted/countered/accepted/declined.
+- Blocked cards are **kept on the offer**, flagged `accepted=false` at 0 kr — the seller
+  sees what happened instead of cards silently vanishing.
+- One line = one printing × condition × language (`app.sell_offer_items`), so the same
+  card in NM and MP are separate priced lines. Duplicate identical lines merge on submit.
+- Frontend: `/sell` (`pages/Sell.tsx`) — store terms + full rate card, draft builder
+  (localStorage `lib/sellDraft.ts`, import from a cardlist, per-line condition/language),
+  live quote with a loud "estimate, not a deal" banner, offer inbox with the store's
+  re-price panel. `components/PrintingPicker.tsx` + `lib/cardLabels.ts` guarantee one
+  exact printing is picked (set, collector no., edition, foiling, rarity, variant, pitch,
+  price, thumbnail — plus a `#id` suffix when two rows share every visible attribute).
+  `components/BuylistSettings.tsx` is the owner panel on /account (renders only for the
+  store account); `SellToStoreButton` shows the store's price inside the card detail modal.
 
 ## Direct messages (2026-07-08)
 - `app.messages` + `fab_api/routers/messages.py`: `POST /messages` (to_user_id or

@@ -6,6 +6,61 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-07-30 — Buylist: "Sell to t4ngo" (store buys cards from users)
+
+User asked for a Sell tab where people send the store a list of cards, the store sees a
+pending sale to modify or accept, and the store account controls buy % / condition rates /
+blacklists — with cards pinned to one exact printing plus condition and language.
+
+- **New router `fab_api/routers/buylist.py`** + 4 tables (`buylist_settings`,
+  `buylist_rules`, `sell_offers`, `sell_offer_items`) in `setup_db.py` and the router's
+  self-migration. Store = `lower(username)='t4ngo'` (env `BUYLIST_STORE_USERNAME`, else
+  oldest `is_dev`), so it resolved to the existing T4ngo account with no data migration.
+- **Rate card**: base % of market, per-condition %, per-language %, minimum card value,
+  a public note, and an open/closed switch. Defaults are merged in at read time rather
+  than written to the row, so a key the owner never touched still prices sensibly and
+  later default changes take effect.
+- **Rules table does double duty**: `action='block'` is the blacklist the user asked for
+  (no commons, no gold foil, nothing from GEM/LGS), `action='pct'` re-prices a slice
+  instead of refusing it (Rainbow Foil ×1.2). Blocks beat rates.
+- **Rarity normalisation was required**: `gold.rarity` carries BOTH short codes
+  (`C`, `M`, from the-fab-cube) and long words (`Common`, `Majestic`, from tcgcsv) for the
+  same rarity. Without collapsing them, "don't buy commons" would have missed every
+  tcgcsv-sourced printing. `_norm_rarity` maps both spellings to one canonical key and
+  rules are stored canonically.
+- **Nothing is binding until accepted** — enforced in three places: the quote endpoint
+  returns `binding:false` + a notice string, the UI shows a loud estimate banner, and the
+  offer itself is a turn-based negotiation (`awaiting_user_id`, same state machine as
+  trade offers). Store counters per line (`offered_sek` / `qty` / drop / note) → turn flips
+  → the seller must accept again.
+- **Blocked cards are kept on the offer** flagged `accepted=false` at 0 kr instead of being
+  dropped, so a seller can see "you sent 4 commons, I don't buy those" rather than watching
+  cards disappear.
+- **Server always re-quotes on submit** — the client's estimate is never trusted — and the
+  whole policy is snapshotted into `policy_snapshot` so an old offer stays auditable after
+  the rates change.
+- **Exact-printing picking** (`PrintingPicker.tsx` + `lib/cardLabels.ts`): shows set,
+  collector number, edition, foiling, rarity, alt-art variant, pitch, price and artwork.
+  Discovered while testing that a few printings share EVERY visible attribute (ELE146 has
+  two 1st-Edition Rainbow Foil rows differing only in artwork/id), so the picker appends a
+  `#id` suffix when a signature is duplicated.
+- One line = printing × condition × language, so the same card in NM and MP price
+  separately; identical lines merge on submit.
+- Frontend: `/sell` page (store terms + rate card, draft builder in localStorage with
+  import-from-cardlist, live quote, offer inbox with the store's re-price panel), nav item
+  with a "waiting on you" badge, owner panel on /account, and a "store buys this / Sell"
+  block in the card detail modal.
+- **Verified**: 63-check scripted flow on :8012 against real card data (rate clamping,
+  owner-only settings, blacklist normalisation, condition/language multipliers, min-value
+  guard, duplicate merging, turn enforcement 403s, counter → re-accept → complete, 409s on
+  closed/settled offers, stranger 404). All passed; the real store policy was snapshotted
+  and restored, temp users removed. tsc + Vite build clean.
+- Deliberately NOT done: no card locking on sell offers (unlike trades — you're selling
+  your own cards, there's no counterparty inventory to reserve), and the seller can't
+  counter a counter (they accept, decline, or withdraw and resend).
+
+---
+
 ## 2026-07-08 — Trade negotiation with card locking, per-seller carts, direct messages
 
 User asked for a failproof + friendly trade flow. Built end-to-end (backend verified by a

@@ -451,6 +451,70 @@ CREATE TABLE IF NOT EXISTS app.bug_reports (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS bug_reports_status ON app.bug_reports (status, created_at DESC);
+
+-- Buylist: the store account buys cards from users at a % of market value.
+-- Settings hold the rate card; rules blacklist or re-price slices of the
+-- catalogue (rarity / foiling / edition / set / condition / language).
+CREATE TABLE IF NOT EXISTS app.buylist_settings (
+    user_id       BIGINT      PRIMARY KEY REFERENCES app.users(user_id) ON DELETE CASCADE,
+    enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
+    base_pct      NUMERIC     NOT NULL DEFAULT 60,
+    min_card_sek  NUMERIC     NOT NULL DEFAULT 0,
+    condition_pct JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    language_pct  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    notes         TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS app.buylist_rules (
+    rule_id    BIGSERIAL   PRIMARY KEY,
+    user_id    BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    field      TEXT        NOT NULL,
+    value      TEXT        NOT NULL,
+    action     TEXT        NOT NULL DEFAULT 'block',
+    pct        NUMERIC,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, field, value)
+);
+CREATE INDEX IF NOT EXISTS buylist_rules_user ON app.buylist_rules (user_id);
+
+-- One sale from a user to the store; turn-based like trade offers
+-- (awaiting_user_id = whose move it is). Nothing binds until 'accepted'.
+CREATE TABLE IF NOT EXISTS app.sell_offers (
+    sell_offer_id     BIGSERIAL   PRIMARY KEY,
+    seller_user_id    BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    buyer_user_id     BIGINT      NOT NULL REFERENCES app.users(user_id) ON DELETE CASCADE,
+    status            TEXT        NOT NULL DEFAULT 'submitted',
+    awaiting_user_id  BIGINT,
+    seller_message    TEXT,
+    buyer_message     TEXT,
+    quoted_total_sek  NUMERIC,
+    offered_total_sek NUMERIC,
+    policy_snapshot   JSONB,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    accepted_at       TIMESTAMPTZ,
+    completed_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS sell_offers_seller ON app.sell_offers (seller_user_id, status);
+CREATE INDEX IF NOT EXISTS sell_offers_buyer  ON app.sell_offers (buyer_user_id, status);
+
+-- One line = one exact printing in one condition and one language.
+CREATE TABLE IF NOT EXISTS app.sell_offer_items (
+    item_id            BIGSERIAL   PRIMARY KEY,
+    sell_offer_id      BIGINT      NOT NULL REFERENCES app.sell_offers(sell_offer_id) ON DELETE CASCADE,
+    printing_unique_id TEXT        NOT NULL,
+    qty                INTEGER     NOT NULL DEFAULT 1,
+    card_condition     TEXT        NOT NULL DEFAULT 'NM',
+    card_language      TEXT        NOT NULL DEFAULT 'EN',
+    market_sek         NUMERIC,
+    quoted_sek         NUMERIC,
+    offered_sek        NUMERIC,
+    accepted           BOOLEAN     NOT NULL DEFAULT TRUE,
+    note               TEXT,
+    added_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS sell_offer_items_offer ON app.sell_offer_items (sell_offer_id);
 """
 
 
@@ -518,6 +582,8 @@ def main():
     ok("app.cardlists / cardlist_items")
     ok("app.trade_offers / trade_offer_items / trade_offer_lists / trade_locks")
     ok("app.messages")
+    ok("app.buylist_settings / buylist_rules")
+    ok("app.sell_offers / sell_offer_items")
     ok("extension: pg_trgm")
     cur.close()
     conn.close()
