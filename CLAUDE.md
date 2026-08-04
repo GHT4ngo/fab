@@ -289,6 +289,19 @@ Users sell cards **to the store**; the store is one designated account —
   sees what happened instead of cards silently vanishing.
 - One line = one printing × condition × language (`app.sell_offer_items`), so the same
   card in NM and MP are separate priced lines. Duplicate identical lines merge on submit.
+- **Editing a line** (2026-08-04): `components/PrintingEditor.tsx` swaps a line onto any
+  sibling printing — cascading set → number → edition → finish → alt-art pickers that only
+  offer existing combinations, then artwork+price tiles when the catalogue still can't
+  separate two rows (see the duplicate-printing hazard above). Used in the seller's draft
+  AND in the store's counter panel. `PATCH /buylist/offers/{id}` `counter` takes
+  `printing_unique_id` / `condition` / `language` / `remove` per item plus `add_items`;
+  changing the CARD re-quotes that line against the offer's `policy_snapshot`, not today's
+  rates. A counter that would empty the list is refused (decline instead).
+- **Printing** (2026-08-04): `/sell/print/:id` (`pages/PrintOffer.tsx`) renders a plain
+  black-on-white A4 document — print or Save as PDF, no server-side PDF dependency. Drafts
+  print via `/sell/print/draft` (payload handed over in `sessionStorage`). App chrome is
+  hidden with `.no-print` on the nav + bug reporter; print CSS is scoped inside the page so
+  the locked `index.css` design system is untouched.
 - Frontend: `/sell` (`pages/Sell.tsx`) — store terms + full rate card, draft builder
   (localStorage `lib/sellDraft.ts`, import from a cardlist, per-line condition/language),
   live quote with a loud "estimate, not a deal" banner, offer inbox with the store's
