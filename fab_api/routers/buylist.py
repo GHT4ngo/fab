@@ -450,11 +450,18 @@ class ItemUpdate(BaseModel):
     qty: Optional[int] = None
     accepted: Optional[bool] = None
     note: Optional[str] = None
+    # Correcting the card itself — the seller may have picked the wrong set,
+    # number, edition or finish. Changing any of these re-quotes the line.
+    printing_unique_id: Optional[str] = None
+    condition: Optional[str] = None
+    language: Optional[str] = None
+    remove: bool = False
 
 
 class SellOfferAction(BaseModel):
     action: str                            # accept | decline | cancel | complete | counter
     item_updates: list[ItemUpdate] = []
+    add_items: list[QuoteItem] = []        # cards the seller left off the list
     message: Optional[str] = None
 
 
@@ -983,8 +990,62 @@ def sell_offer_act(sell_offer_id: int, req: SellOfferAction, user: dict = Depend
             if action == "counter":
                 if not is_buyer:
                     raise HTTPException(status_code=403, detail="Only the buyer can re-price a sale offer")
+
+                # Re-quote against the policy the offer was MADE under, not
+                # today's — swapping a printing must not silently move the rest
+                # of the deal onto new rates.
+                policy = offer.get("policy_snapshot") or _policy(cur, offer["buyer_user_id"])
+
                 for upd in req.item_updates:
+                    if upd.remove:
+                        cur.execute(
+                            "DELETE FROM app.sell_offer_items WHERE item_id = %s AND sell_offer_id = %s",
+                            [upd.item_id, sell_offer_id],
+                        )
+                        continue
+
+                    cur.execute(
+                        "SELECT * FROM app.sell_offer_items WHERE item_id = %s AND sell_offer_id = %s",
+                        [upd.item_id, sell_offer_id],
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        continue
+                    item = dict(row)
+
                     sets, params = [], []
+                    card_changed = False
+                    pid = item["printing_unique_id"]
+                    condition = item["card_condition"]
+                    language = item["card_language"]
+
+                    if upd.printing_unique_id and upd.printing_unique_id.strip() != pid:
+                        pid = upd.printing_unique_id.strip()
+                        card_changed = True
+                    if upd.condition and _norm_condition(upd.condition) != condition:
+                        condition = _norm_condition(upd.condition)
+                        card_changed = True
+                    if upd.language and _norm_language(upd.language) != language:
+                        language = _norm_language(upd.language)
+                        card_changed = True
+
+                    if card_changed:
+                        cards = _load_cards(cur, [pid])
+                        if pid not in cards:
+                            raise HTTPException(status_code=404, detail=f"Unknown printing: {pid}")
+                        q = _quote_card(policy, cards[pid], condition, language)
+                        sets += ["printing_unique_id = %s", "card_condition = %s", "card_language = %s",
+                                 "market_sek = %s", "quoted_sek = %s", "accepted = %s"]
+                        params += [pid, condition, language, q["market_sek"], q["unit_sek"], q["accepted"]]
+                        # Keep an explicit price if the store set one in the same
+                        # breath; otherwise the corrected card carries its own quote.
+                        if upd.offered_sek is None:
+                            sets.append("offered_sek = %s")
+                            params.append(q["unit_sek"])
+                        if upd.note is None and q["reasons"]:
+                            sets.append("note = %s")
+                            params.append("; ".join(q["reasons"])[:300])
+
                     if upd.offered_sek is not None:
                         sets.append("offered_sek = %s")
                         params.append(max(0.0, min(1_000_000.0, float(upd.offered_sek))))
@@ -1005,6 +1066,36 @@ def sell_offer_act(sell_offer_id: int, req: SellOfferAction, user: dict = Depend
                         "WHERE item_id = %s AND sell_offer_id = %s",
                         params,
                     )
+
+                # Cards the seller left off the list.
+                for add in req.add_items:
+                    add_pid = (add.printing_unique_id or "").strip()
+                    if not add_pid:
+                        continue
+                    cards = _load_cards(cur, [add_pid])
+                    if add_pid not in cards:
+                        raise HTTPException(status_code=404, detail=f"Unknown printing: {add_pid}")
+                    condition = _norm_condition(add.condition)
+                    language = _norm_language(add.language)
+                    q = _quote_card(policy, cards[add_pid], condition, language)
+                    cur.execute(
+                        """
+                        INSERT INTO app.sell_offer_items
+                            (sell_offer_id, printing_unique_id, qty, card_condition, card_language,
+                             market_sek, quoted_sek, offered_sek, accepted, note)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        [sell_offer_id, add_pid, max(1, min(999, add.qty)), condition, language,
+                         q["market_sek"], q["unit_sek"], q["unit_sek"], q["accepted"],
+                         "; ".join(q["reasons"])[:300] or None],
+                    )
+
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM app.sell_offer_items WHERE sell_offer_id = %s",
+                    [sell_offer_id],
+                )
+                if cur.fetchone()["n"] == 0:
+                    raise HTTPException(status_code=400, detail="A counter-offer can't be empty — decline instead")
                 cur.execute(
                     """
                     UPDATE app.sell_offers

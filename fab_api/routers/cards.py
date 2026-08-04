@@ -281,16 +281,19 @@ def card_printings(name: str):
     sql = """
         SELECT
             g.printing_unique_id,
+            g.display_id,
             g.set_id,
             coalesce(s.set_name, g.set_id) AS set_name,
             g.edition,
             g.foiling,
             g.rarity,
+            g.variant,
             g.pitch,
             g.image_url,
             g.price_eur,
             g.tcg_price_usd,
             g.price_sek,
+            g.trade_value_sek,
             g.cm_idproduct
         FROM gold.gold_cards g
         LEFT JOIN bronze.fab_sets s
@@ -309,5 +312,6 @@ def card_printings(name: str):
         d["price_eur"]     = float(d["price_eur"])     if d["price_eur"]     else None
         d["tcg_price_usd"] = float(d["tcg_price_usd"]) if d["tcg_price_usd"] else None
         d["price_sek"]     = int(d["price_sek"])        if d["price_sek"]     else None
+        d["trade_value_sek"] = int(d["trade_value_sek"]) if d["trade_value_sek"] else None
         result.append(d)
     return result
