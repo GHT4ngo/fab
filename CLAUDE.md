@@ -267,6 +267,11 @@ Users sell cards **to the store**; the store is one designated account —
   {rarity, foiling, edition, set_id, condition, language}, `action` ∈ {block, pct}.
   `block` = never buy (the user's "no commons, no gold foil, nothing from GEM/LGS");
   `pct` multiplies the base rate for matching cards. Blocks always beat rates.
+  `max_value_sek` (2026-08-04) scopes a rule to cheap copies only — it applies only when
+  market ≤ that amount (inclusive), null = always. **Why it exists: rarity does not
+  predict value once foiling is involved.** A blanket "don't buy Commons" rejected the
+  Monarch Cold Foils (Halo of Illumination, rarity Common, 208 kr) — 40% of a real
+  collection's value. The live t4ngo policy is now `Common ≤5 kr` / `Rare ≤5 kr`.
   `gold.rarity` mixes short codes and long words for the same rarity → `_norm_rarity`
   collapses them (`C`/`Common` → `common`) so ONE rule catches both spellings.
 - **Price** = `greatest(trade_value_sek, price_sek)` × base% × condition% × language%

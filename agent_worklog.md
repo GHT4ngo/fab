@@ -6,6 +6,37 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-08-04 (later) — Value-scoped buylist rules: rarity ≠ value
+
+Testing the paste importer on the real Monarch list against the LIVE store policy exposed
+a pricing bug in the rule model, not the code: the user's blanket "never buy Common" and
+"never buy Rare" blocks were rejecting **the most valuable cards in the collection**.
+
+In FaB, rarity stops predicting value once foiling is involved. Monarch Cold Foils are
+rarity *Common* but are the chase cards — Halo of Illumination Cold Foil = 208 kr each.
+The policy as configured declined 690 kr of 1,709 kr market value (40%), offering 715 kr
+for a collection worth 1,709.
+
+Fix: `app.buylist_rules.max_value_sek` — a rule can be scoped to "only at/below X kr"
+(inclusive), null = always. `_quote_card` skips a rule whose cap is below the card's
+market value, and the block reason names the threshold ("rarity: Common at or under
+5 kr"). Rule builder gets a `≤ kr` box; the public rate card shows the threshold so
+sellers understand what's refused. Alternative considered and rejected: a global
+`min_card_sek` floor — it would also have binned cheap *majestics*, which the user wants
+to keep.
+
+Applied to the live t4ngo store at the user's request (temp session token for the store
+account, deleted after; the two blanket rarity blocks became `Common ≤5 kr` /
+`Rare ≤5 kr`). Same list now: 0 lines rejected, **market 1,680 kr → offer 1,181 kr at
+70%**. Verified with a scripted test on :8014 first (cap stored, cold-foil common kept,
+2 kr common blocked, exactly-5 kr blocked inclusively, clearing the cap restores blanket
+behaviour) — policy snapshotted and restored around the test.
+
+Note: card prices moved slightly mid-session (Shadow Puppetry 133 → 100 kr) because the
+user ran the ingest pipeline in parallel at 17:03 local — not a calculation change.
+
+---
+
 ## 2026-08-04 — Paste-a-list importer (text collection → priced printings)
 
 User forwarded a real Cardmarket message: a seller offering a Monarch 1st-Edition
