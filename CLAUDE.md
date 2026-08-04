@@ -293,6 +293,35 @@ Users sell cards **to the store**; the store is one designated account —
   `components/BuylistSettings.tsx` is the owner panel on /account (renders only for the
   store account); `SellToStoreButton` shows the store's price inside the card detail modal.
 
+## Paste-a-list importer (2026-08-04)
+`POST /cards/parse-list` (public, read-only) turns a pasted text collection into
+resolved printings. Logic in `fab_api/list_parser.py`; UI in
+`components/PasteListImport.tsx`, used from the /sell draft builder.
+- Reads: section headings (`*Majestic Foil*`), `3x Name` / `Name x3`, treatments in
+  parens (`(Regular)`/`(Rainbow Foil)`/`(Cold Foil)`/`(Extended Art Rainbow Foil)`),
+  pitch colours `(Red/Yellow/Blue)`, collector codes (`(MON124)`, `- MON006`), bullets,
+  trailing commas. Repeated identical lines fold into a quantity.
+- Auto-detects set + edition from a heading ("Flesh and Blood Monarch First Edition"
+  → MON / F). **Set detection resolves against `gold.gold_cards`** — `bronze.fab_sets`
+  still carries the composite rows (`MON105 // MON`) dbt keeps out of gold, and they
+  otherwise win the name match.
+- **Never guesses on money.** `gold` holds printings that share every displayed
+  attribute and differ wildly in price (MON034 1st-Ed Rainbow Foil at 7 kr AND 873 kr;
+  251 of 1,377 duplicate signatures have a >25% + >20 kr spread — the pairs differ only
+  by `image_url`, e.g. `MON124.width-450.png` vs `MON124-RF.png`). Statuses:
+  `matched` (one fit) · `auto_picked` (several, but within 1.25× or 20 kr — takes the
+  cheapest, says so) · `ambiguous` (several, price genuinely differs → the UI makes a
+  human pick, showing artwork + price) · `unmatched` (difflib near-misses offered).
+- A name absent from the chosen set is retried across ALL sets before being called
+  missing (pastes mix sets). Headings/greetings that match nothing are moved to
+  `skipped_lines` and shown, not silently dropped.
+- One catalogue query per request (scoped by set = ~15 ms; unscoped ~170 ms), matching
+  in Python — a 200-line paste must not become 200 round trips.
+- **No LLM involved and none needed**: on the real 46-card Monarch list this was tested
+  against, 32/33 lines resolved deterministically; the one flagged was the genuinely
+  ambiguous Extended Art foil. An LLM would guess there, which is exactly the failure
+  that costs money.
+
 ## Direct messages (2026-07-08)
 - `app.messages` + `fab_api/routers/messages.py`: `POST /messages` (to_user_id or
   to_username), `GET /messages/threads`, `GET /messages/with/{id}` (marks incoming as

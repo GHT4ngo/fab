@@ -6,6 +6,63 @@ part. See `CLAUDE.md` for architecture and `README.md` for setup.
 
 ---
 
+## 2026-08-04 — Paste-a-list importer (text collection → priced printings)
+
+User forwarded a real Cardmarket message: a seller offering a Monarch 1st-Edition
+collection as a plain-text list, and asked whether we need "assistance of an AI" to paste
+text and make lists from it.
+
+**Answer: no, and deliberately so.** Checked first — all 15 sampled card names from that
+message matched `gold.gold_cards` exactly, zero fuzzy matching needed. The hard part isn't
+reading English, it's that the catalogue can't tell two printings apart:
+
+- `MON124` 1st-Ed Rainbow Foil exists TWICE, both `variant IS NULL`, at **16 kr and
+  309 kr**. `MON004` likewise (36 / 475), `MON034` (7 / 873). Across the catalogue,
+  **251 of 1,377 duplicate (display_id, edition, foiling) signatures** have a >25% AND
+  >20 kr spread. The only discriminator in gold is `image_url`
+  (`MON124.width-450.png` vs `MON124-RF.png`).
+- The seller's list says "Mark of the Beast (**Extended Art** Rainbow Foil)" — the exact
+  card where guessing wrong is a ~290 kr error on one line. An LLM would confidently pick
+  one. So the parser refuses: those lines come back `ambiguous` with every candidate,
+  artwork and price, and a human settles them in the UI.
+
+Built `fab_api/list_parser.py` + `POST /cards/parse-list` (public, read-only) and
+`PasteListImport.tsx` on /sell. Handles headings, `3x Name` / `Name x3`, treatment parens,
+pitch colours, collector codes, bullets, trailing commas, repeated lines → quantities.
+
+### What broke while testing (and the fixes)
+- **Title line eaten as a card**: "Flesh and Blood Monarch First Edition" is 6 words, so
+  the ≤5-word heading rule missed it and it became a phantom missing card. Fixed with a
+  post-match rescue: a line that matched NOTHING and names an edition or the detected set
+  is retired to `skipped_lines`. Only applied to already-unmatched lines, so a real card
+  name can't be swallowed.
+- **Set detection returned `MON105 // MON`**: `bronze.fab_sets` still contains the
+  composite-product rows dbt keeps out of gold, and they share the set_name "Monarch".
+  Fixed by requiring the set_id to have no delimiter AND to exist in `gold.gold_cards`.
+  Same guard on the bare-code fallback, which is now also limited to the first 5 lines
+  (scanning a whole paste for `[A-Z]{2,4}` hits random capitalised words).
+- **`Dread Scythe (Regular),`** — the trailing comma stopped the parenthetical peel, so
+  the treatment stayed glued to the name. Now punctuation is stripped inside the peel loop.
+- **Cards from other sets reported as missing**: with set scoping on, "Sink Below" in an
+  ELE-headed paste came back unmatched. Now a miss is retried across all sets (one extra
+  query, only for the misses) and labelled "Not in ELE — showing every set".
+- Normalising the whole paste into one string for set detection let a set name match
+  across a line break; detection now works line by line.
+
+### Verified
+Real 46-card message: set MON + edition F auto-detected, 32/33 lines resolved, 1 flagged
+(the Extended Art foil), 3 headings + the title reported as ignored, market total 1,400 kr
+for the resolved part. Edge formats covered: quantity styles, pitch colours, typos
+(difflib suggestions), collector codes, messy bullets, explicit set/edition override,
+prose/greetings/signatures. tsc + Vite build clean; live check on the domain.
+
+Also: the store account now sees the /sell builder as a **pricing scratchpad** — paste a
+customer's list, see what it comes to at your own rates, nothing is sent. Checked the
+210,007 kr outlier that surfaced (Command and Conquer FAB278 RF) — it's a genuine €19,000
+Cardmarket listing, not a data bug.
+
+---
+
 ## 2026-07-30 — Buylist: "Sell to t4ngo" (store buys cards from users)
 
 User asked for a Sell tab where people send the store a list of cards, the store sees a
