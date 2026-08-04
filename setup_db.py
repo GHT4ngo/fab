@@ -473,9 +473,13 @@ CREATE TABLE IF NOT EXISTS app.buylist_rules (
     value      TEXT        NOT NULL,
     action     TEXT        NOT NULL DEFAULT 'block',
     pct        NUMERIC,
+    -- Rule only applies at/below this market value, so "Commons under 5 kr"
+    -- doesn't reject a 208 kr Cold Foil common.
+    max_value_sek NUMERIC,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, field, value)
 );
+ALTER TABLE app.buylist_rules ADD COLUMN IF NOT EXISTS max_value_sek NUMERIC;
 CREATE INDEX IF NOT EXISTS buylist_rules_user ON app.buylist_rules (user_id);
 
 -- One sale from a user to the store; turn-based like trade offers

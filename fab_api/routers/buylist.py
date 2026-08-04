@@ -54,9 +54,11 @@ CREATE TABLE IF NOT EXISTS app.buylist_rules (
     value      TEXT        NOT NULL,
     action     TEXT        NOT NULL DEFAULT 'block',  -- block | pct
     pct        NUMERIC,
+    max_value_sek NUMERIC,                         -- rule only bites at/below this market value
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, field, value)
 );
+ALTER TABLE app.buylist_rules ADD COLUMN IF NOT EXISTS max_value_sek NUMERIC;
 CREATE INDEX IF NOT EXISTS buylist_rules_user ON app.buylist_rules (user_id);
 
 CREATE TABLE IF NOT EXISTS app.sell_offers (
@@ -244,7 +246,7 @@ def _policy(cur, store_user_id: int) -> dict:
     language_pct = {**DEFAULT_LANGUAGE_PCT, **(s.get("language_pct") or {})}
 
     cur.execute(
-        "SELECT rule_id, field, value, action, pct FROM app.buylist_rules "
+        "SELECT rule_id, field, value, action, pct, max_value_sek FROM app.buylist_rules "
         "WHERE user_id = %s ORDER BY field, value",
         [store_user_id],
     )
@@ -254,6 +256,7 @@ def _policy(cur, store_user_id: int) -> dict:
         "value": r["value"],
         "action": r["action"],
         "pct": float(r["pct"]) if r["pct"] is not None else None,
+        "max_value_sek": float(r["max_value_sek"]) if r["max_value_sek"] is not None else None,
         "label": _rule_label(r["field"], r["value"]),
     } for r in cur.fetchall()]
 
@@ -315,8 +318,14 @@ def _quote_card(policy: dict, card: dict, condition: str, language: str) -> dict
         got = attrs.get(rule["field"])
         if got is None or got.lower() != want.lower():
             continue
+        # A value-scoped rule only bites on cheap copies: "Commons at or under
+        # 5 kr" must not touch a 208 kr Cold Foil common.
+        cap = rule.get("max_value_sek")
+        if cap is not None and (market is None or market > cap):
+            continue
+        scope = f" at or under {int(cap)} kr" if cap is not None else ""
         if rule["action"] == "block":
-            blocked_by.append(f"{rule['field'].replace('_', ' ')}: {rule['label']}")
+            blocked_by.append(f"{rule['field'].replace('_', ' ')}: {rule['label']}{scope}")
         elif rule["pct"] is not None:
             rule_pcts.append(rule)
 
@@ -432,6 +441,7 @@ class RuleCreate(BaseModel):
     value: str
     action: str = "block"
     pct: Optional[float] = None
+    max_value_sek: Optional[float] = None   # rule only applies at/below this market value
 
 
 class ItemUpdate(BaseModel):
@@ -623,19 +633,21 @@ def buylist_rule_add(req: RuleCreate, user: dict = Depends(_current_user)):
         if req.pct is None:
             return JSONResponse(status_code=400, content={"error": "A % rule needs a percentage"})
         pct = max(0.0, min(1000.0, float(req.pct)))
+    cap = None if req.max_value_sek is None else max(0.0, float(req.max_value_sek))
 
     with get_conn() as conn:
         with conn.cursor() as cur:
             store = _require_store_owner(cur, user)
             cur.execute(
                 """
-                INSERT INTO app.buylist_rules (user_id, field, value, action, pct)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO app.buylist_rules (user_id, field, value, action, pct, max_value_sek)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id, field, value)
-                DO UPDATE SET action = EXCLUDED.action, pct = EXCLUDED.pct
+                DO UPDATE SET action = EXCLUDED.action, pct = EXCLUDED.pct,
+                              max_value_sek = EXCLUDED.max_value_sek
                 RETURNING rule_id
                 """,
-                [store["user_id"], field, value, action, pct],
+                [store["user_id"], field, value, action, pct, cap],
             )
             cur.fetchone()
             policy = _policy(cur, store["user_id"])
