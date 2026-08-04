@@ -1,12 +1,80 @@
-"""Browse endpoints: /cards, /sets, /stats, /card-printings."""
+"""Browse endpoints: /cards, /sets, /stats, /card-printings, /cards/parse-list."""
 
 from typing import Optional
 
 from fastapi import APIRouter, Query, Response
+from pydantic import BaseModel
 
+from fab_api import list_parser
 from fab_api.core import get_conn
 
 router = APIRouter()
+
+
+# ── /cards/parse-list ────────────────────────────────────────────────────────
+
+class ParseListRequest(BaseModel):
+    text: str
+    set_id: Optional[str] = None
+    edition: Optional[str] = None
+
+
+@router.post("/cards/parse-list")
+def parse_list(req: ParseListRequest):
+    """Turn a pasted text collection into resolved printings.
+
+    Public and read-only. Deliberately conservative: lines that could be two
+    printings at very different prices come back as `ambiguous` with every
+    candidate, because the catalogue holds same-looking printings that differ
+    10× in value. Callers are expected to make a human resolve those."""
+    parsed = list_parser.parse_text(req.text or "")
+    set_id = (req.set_id or "").strip().upper() or None
+    edition = (req.edition or "").strip().upper() or None
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            detected_set = list_parser.detect_set(cur, parsed["set_text"])
+            if not set_id and detected_set:
+                set_id = detected_set["set_id"]
+            if not edition and parsed["edition_hint"]:
+                edition = parsed["edition_hint"]
+            entries = list_parser.match_entries(cur, parsed["entries"], set_id, edition)
+
+    # A title line ("Flesh and Blood Monarch First Edition") parses as a card and
+    # then matches nothing. Once we know it named the set/edition, retire it to
+    # the skipped list instead of reporting a phantom missing card.
+    kept = []
+    for e in entries:
+        if e["status"] == "unmatched" and not e["candidates"] and (
+            list_parser.looks_like_heading(e["name"], detected_set["set_name"] if detected_set else None)
+            or list_parser.looks_like_noise(e["name"])
+        ):
+            parsed["skipped_lines"].append(e["name"])
+            continue
+        kept.append(e)
+    entries = kept
+
+    counts = {"matched": 0, "auto_picked": 0, "ambiguous": 0, "unmatched": 0}
+    total_qty = 0
+    est_sek = 0
+    for e in entries:
+        counts[e["status"]] = counts.get(e["status"], 0) + 1
+        total_qty += e["qty"]
+        if e["chosen"] and e["chosen"]["value_sek"]:
+            est_sek += e["chosen"]["value_sek"] * e["qty"]
+
+    return {
+        "set_id": set_id,
+        "edition": edition,
+        "detected_set": detected_set,
+        "detected_edition": parsed["edition_hint"],
+        "entries": entries,
+        "skipped_lines": parsed["skipped_lines"],
+        "counts": counts,
+        "total_qty": total_qty,
+        "est_market_sek": est_sek,
+        "needs_review": counts["ambiguous"] + counts["unmatched"],
+    }
 
 
 # ── /cards ────────────────────────────────────────────────────────────────────
