@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -73,13 +74,19 @@ _pg_pool: psycopg2.pool.ThreadedConnectionPool | None = None
 _pg_pool_lock = threading.Lock()
 
 
+# FastAPI runs sync endpoints on a large threadpool, and one page load fires
+# several API calls at once, so short bursts above the pool size are normal.
+PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "32"))
+PG_POOL_WAIT = float(os.getenv("PG_POOL_WAIT", "10"))
+
+
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pg_pool
     if _pg_pool is None:
         with _pg_pool_lock:
             if _pg_pool is None:
                 _pg_pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1, maxconn=12,
+                    minconn=1, maxconn=PG_POOL_MAX,
                     host=PG_HOST, port=PG_PORT,
                     database="fab",
                     user=PG_USER, password=PG_PASSWORD,
@@ -88,10 +95,29 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     return _pg_pool
 
 
+def _acquire(pool: psycopg2.pool.ThreadedConnectionPool):
+    """Wait briefly for a free connection instead of failing the request.
+
+    psycopg2's getconn() raises PoolError the instant the pool is empty, which
+    turned a momentary burst into 500s for whatever else was in flight. Backing
+    off and retrying makes a burst queue for a few milliseconds instead."""
+    deadline = time.monotonic() + PG_POOL_WAIT
+    delay = 0.01
+    while True:
+        try:
+            return pool.getconn()
+        except psycopg2.pool.PoolError:
+            if time.monotonic() >= deadline:
+                _slog("[DB] connection pool exhausted — raise PG_POOL_MAX if this repeats")
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.2)
+
+
 @contextmanager
 def get_conn():
     pool = _get_pool()
-    conn = pool.getconn()
+    conn = _acquire(pool)
     broken = False
     try:
         yield conn

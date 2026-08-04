@@ -94,10 +94,25 @@ SESSION_TTL     = "30 days"      # how long a login session lasts
 PASSWORD_ITERATIONS = 160_000
 
 
+_auth_schema_ready = False
+
+
 def ensure_app_auth_schema():
+    """Run the auth DDL once per process, like the other routers.
+
+    It used to run on EVERY auth call, and the DDL touches app.users then
+    app.sessions (ALTER/CREATE INDEX + the is_dev UPDATE). `_current_user`
+    locks them the other way round — it UPDATEs app.sessions.last_seen_at and
+    then reads app.users — so a login landing on top of ordinary authenticated
+    traffic could deadlock, 500-ing whatever else was in flight (seen 7× in one
+    session on 2026-07-08). Guarding it removes the collision window."""
+    global _auth_schema_ready
+    if _auth_schema_ready:
+        return
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(APP_AUTH_SCHEMA_SQL)
+    _auth_schema_ready = True
 
 
 def _normalise_email(raw: str | None) -> str | None:
