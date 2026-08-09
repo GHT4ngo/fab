@@ -1,0 +1,25 @@
+[Unit]
+Description=FAB Matrix — API + Cloudflare tunnel
+Documentation=https://fabmatrix.t4ngo.com
+After=network-online.target
+Wants=network-online.target
+# Never stop retrying: a flapping start (bad code, DB not up yet) must not
+# leave the site down until someone notices.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tango/Projects/fab
+# systemd-inhibit holds the laptop awake for exactly as long as the API runs —
+# idle suspend AND closing the lid. Stop the service and sleep works normally
+# again, so this can't strand the machine awake by accident.
+ExecStart=/usr/bin/systemd-inhibit \
+  --who=fab-api --why="Serving fabmatrix.t4ngo.com" \
+  --mode=block --what=sleep:idle:handle-lid-switch \
+  /home/tango/Projects/fab/.venv/bin/python start_fab.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

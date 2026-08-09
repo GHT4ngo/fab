@@ -165,6 +165,25 @@ always, no rebuild). Git timeouts are nonblocking so API startup does not hang o
 URL changes on reboot, tunnel death (now auto-detected + replaced), or `--new-tunnel`.
 `--stop-tunnel` tears it down.
 
+## Uptime: the API runs as a systemd USER service (2026-08-09)
+The host is a **laptop** (Ubuntu 26.04), so the two things that took the site down were
+lid-close (logind default = suspend, instant) and idle-suspend (GNOME: 2 h on AC, 1 h on
+battery) — plus closing the terminal, since it used to run in the foreground.
+- Unit: `~/.config/systemd/user/fab-api.service`, copy kept at `deploy/fab-api.service`.
+  `ExecStart` wraps `start_fab.py` in
+  `systemd-inhibit --mode=block --what=sleep:idle:handle-lid-switch`, so **the laptop
+  cannot idle-sleep or lid-sleep while the API is running**, and sleeps normally again the
+  moment the service is stopped. `Restart=always`, `StartLimitIntervalSec=0` (never give up).
+- `loginctl enable-linger tango` is ON → it starts at boot without anyone logging in.
+- Manage it with `systemctl --user {status,restart,stop,start} fab-api`,
+  logs with `journalctl --user -u fab-api -f`. **`./run_pipeline.sh --restart` still works**
+  for a manual restart, but prefer `systemctl --user restart fab-api` now — starting a
+  second copy by hand collides on port 8001.
+- Verified: inhibitor held (`sleep:idle:handle-lid-switch`, block), `kill -9` on uvicorn →
+  service auto-restarted and the site was back inside 20 s.
+- A manual suspend from the GNOME menu still works — the inhibitor only blocks *automatic*
+  sleep. Nothing here stops the tunnel dropping while the machine is genuinely asleep.
+
 The `fab` repo is on GitHub at **GHT4ngo/fab** (public). Pushing over HTTPS uses the `gh`
 token as git's credential helper — if a push prompts for a password, run `gh auth setup-git`
 once (GitHub rejects passwords). The `retro-data-display` frontend is a **separate** repo
