@@ -70,8 +70,9 @@ flowchart LR
 
 **Android scanner** (Kotlin, CameraX)
 - Captures the card, waits until the footer text is sharp enough, and sends crops to the
-  API. Recognition is driven by OCR of the collector code, backed by title OCR and ORB
-  visual matching. A visual-only guess is never returned.
+  API. Recognition reads the collector code printed in the card's footer and snaps it to
+  the nearest real card code, correcting common OCR mix-ups (`0`/`O`, `5`/`S`). Partial
+  codes are refused rather than guessed.
 - Pairs with the web app through a short code, and scanned cards appear on the web page
   live.
 
@@ -83,7 +84,7 @@ flowchart LR
 | Storage / transform | PostgreSQL 16 (Docker), dbt-postgres |
 | API | FastAPI, Uvicorn, pooled psycopg2 connections, GZip |
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query |
-| Scanner | Kotlin, CameraX, OkHttp; Tesseract + OpenCV on the server |
+| Scanner | Kotlin, CameraX, OkHttp; Tesseract OCR on the server |
 | Hosting | Cloudflare named tunnel, systemd user services, Resend email |
 
 ## Repository layout
@@ -92,7 +93,6 @@ flowchart LR
 ingest_bronze.py          the-fab-cube catalogue, Cardmarket, Riksbank, manual crosswalk → bronze
 ingest_tcgcsv.py          TCGplayer USD prices + cards from sets missing in the catalogue
 load_collectors_centre.py foil technique per printing (from data/collectors_centre_scrape.md)
-ingest_orb_descriptors.py ORB image features for the scanner's visual fallback
 setup_db.py               idempotent schema for every bronze/app table (single source of truth)
 fab_dbt/                  dbt project: silver_cards (all matching logic) → gold_cards
 api.py                    FastAPI wiring; endpoints live in fab_api/routers/

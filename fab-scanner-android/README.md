@@ -12,12 +12,12 @@ and in a browser stream it was too soft to OCR.
    enough (a Laplacian sharpness gate), then posts three crops to `POST /scan/native`:
    - `footer_crop`: a broad band along the bottom, used for exact collector-code OCR
    - `title_crop`: the title strip, used for fuzzy name OCR
-   - `full_image`: the whole card, used for ORB visual matching
+   - `full_image`: the whole card, kept only as a debug sample
 4. Matches show up live on the paired web page, which polls `/scan/records`.
 
 Server-side decision order: an exact footer `display_id` read (with corrections for
-common OCR confusions such as `R05` → `ROS`), then a strong title match, then visual and
-title agreeing. A visual-only guess is never returned, and partial codes are refused.
+common OCR confusions such as `R05` → `ROS`), then a strong title match (only when the
+server has `easyocr` installed). Partial codes are refused rather than guessed.
 
 Also included: torch, a fixed 2× zoom so the camera can sit at a sharper focus distance,
 tap-to-refocus, and an **Advanced** panel that shows the API

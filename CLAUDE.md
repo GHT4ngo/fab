@@ -30,7 +30,7 @@ sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.si
 `python api.py` / `uvicorn api:app`. Endpoints live in `fab_api/routers/`
 (`cards`, `admin`, `scan`, `auth`, `cardlists`, `tools`, `trade`, `messages`, `buylist`); shared env + the **pooled**
 `get_conn()` context manager (ThreadedConnectionPool, commits on exit, returns conn to
-the pool) in `fab_api/core.py`; the OCR/visual scan engine — moved **verbatim**, logic
+the pool) in `fab_api/core.py`; the OCR scan engine — moved **verbatim**, logic
 untouched — in `fab_api/scan_engine.py`. GZip middleware compresses `/cards` (~11×);
 `/sets` + `/stats` send Cache-Control. `app.*` is the only non-regenerable data:
 `backup_app.py` dumps it to `backups/` (30 kept, gitignored) via the systemd user timer
@@ -49,8 +49,8 @@ fires at next boot — the old cron job never ran once; units in `deploy/`). Res
 `price_sek` = CM EUR → SEK if available, else tcgcsv USD → SEK.
 
 Retired (2026-10-19): **JustTCG** (USD API, 100 req/day — superseded by tcgcsv) and the
-perceptual-hash scanner ingest (superseded by ORB). Their scripts were deleted and
-`setup_db.py` drops their tables; the history is in `docs/DEVLOG.md`. Hand-maintained
+perceptual-hash scanner ingest; ORB visual matching followed the same day (below).
+Their scripts were deleted and `setup_db.py` drops the old tables; the history is in `docs/DEVLOG.md`. Hand-maintained
 inputs live in `data/` (`fab_cm_manual.csv`, `collectors_centre_scrape.md`).
 
 ## Price match tiers (in `silver_cards`, surfaced as `gold.match_tier`)
@@ -420,8 +420,14 @@ makes tabs look inconsistent). The native app mirrors this via a `Theme` palette
   (`_parse_code`+`_snap_code`, typo-corrected). The native app is the primary scanner.
 - The old browser `POST /scan` (+ `/scan/debug`, `_ocr_claude`, `_ocr_google`) was
   **removed 2026-07-05** in the router split. `/scan/native` keeps `_ocr_easyocr` (title)
-  and `_visual_match` (visual fallback) in `fab_api/scan_engine.py` — verified by
-  replaying a saved footer crop (identical result before/after the move).
+  in `fab_api/scan_engine.py` — verified by replaying a saved footer crop (identical
+  result before/after the move).
+- **ORB visual matching REMOVED 2026-10-19.** `_visual_match` read
+  `bronze.card_orb_descriptors`, a table that never existed in this Postgres (the ingest
+  last ran in April against the old DB) — the `try/except` in `scan.py` swallowed the
+  error, so the fallback silently returned nothing for months. Removed with
+  `ingest_orb_descriptors.py`, `_rectify_card` and OpenCV. `full_image` is still accepted
+  (the app sends it) but only saved as a debug sample.
 - Browser debug crops showed the footer strip was correctly framed but physically too soft
   for OCR, so footer OCR alone is not viable in browser video (why the native app won).
 - Backend has local `/scan/native` for Android/native submissions:
@@ -432,8 +438,9 @@ makes tabs look inconsistent). The native app mirrors this via a `Theme` palette
   backend searches multiple subwindows for codes near the lower-left/center footer. OCR
   set-code corrections handle reads like `R05 130` → `ROS130`, while partial collector
   reads are refused so `BET7` cannot snap to a random `BET###` card.
-- Fusion order: footer OCR exact `display_id`; strong title match; visual+title agreement.
-  Visual-only guesses are intentionally not returned.
+- Decision order: footer OCR exact `display_id`; then a strong (≥0.85) title match.
+  Title OCR needs `easyocr`, which is NOT installed (see Gotchas), so in practice the
+  footer code is the only live signal — and it is what makes the scanner work well.
 - Debug crops and metadata save to `tmp/scan_debug_samples/`.
 - `fab-scanner-android/` is a CameraX MVP with card guide, footer sharpness gate, refocus,
   torch, zoom, hidden Advanced API URL field, pair-code field, and POST to `/scan/native`.
@@ -445,7 +452,7 @@ makes tabs look inconsistent). The native app mirrors this via a `Theme` palette
 
 ## Gotchas
 - Python 3.14 venv at `.venv`. Scanner deps currently installed: `numpy`,
-  `opencv-python-headless`, `pytesseract`. `easyocr` is intentionally not installed because
+  `pytesseract` (OpenCV is no longer needed). `easyocr` is intentionally not installed because
   it pulls a very large PyTorch/CUDA stack.
 - Native app debug package id is `com.fabscanner.app.debug`; activity remains
   `com.fabscanner.app.MainActivity`.

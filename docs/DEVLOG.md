@@ -100,6 +100,41 @@ and checks the back button and console errors. One false alarm along the way: my
 "is this nav link active" check guessed at CSS class names and reported failures. The
 reliable signal is `aria-current="page"`, which was correct all along.
 
+**ORB visual matching removed. It had never worked on Postgres.** Asked what the
+"fab orb ingest" was, I checked `bronze.card_orb_descriptors`, and the table did not
+exist. `ingest_orb_descriptors.py` last ran in April against the old database and was
+never re-run after the June move. It also created its own table instead of going
+through `setup_db.py`, so nothing else would have created it. `_visual_match` queried
+the missing table, and the `try/except` in `routers/scan.py` turned the error into
+"no visual candidates" on every scan, for months, without a single log line anyone
+read. Two options:
+- Run the ingest: about 18k image downloads, then keep it current forever.
+- Delete it.
+
+The user chose to delete it. Removed the script, `_visual_match` and its candidate
+cache, `_rectify_card` and its two helpers (they only fed the matcher), the
+visual+title fusion bonus, and OpenCV (uninstalled from the venv afterwards to prove
+nothing still imports it). `scan_engine.py` went from 616 to 356 lines. `full_image` is
+still accepted, because the app sends it, and is saved only when `debug_save` is set.
+No behaviour change for users, since the fallback never produced anything. Title OCR
+needs `easyocr`, which isn't installed, so the footer collector code is the only live
+signal, and it is the one that works.
+
+Verified on the restarted API:
+- `/scan/code?code=HVY050` → Miller's Grindstone.
+- A rendered `HVY050` footer → `method=footer`, 0.99.
+- A request with only a full image → a clean `none`.
+- The `/scanner-apk` download still returns 200.
+
+Side finding, *not* caused by this change (the diff of `scan_engine.py` is deletions
+plus one docstring line): a synthetic `R EN  MON124` footer in DejaVu Sans OCR'd as
+`MQON1T7024` and snapped to **MON170 at 0.99 confidence**. HVY050, WTR001 and ELE146 read
+correctly. A synthetic font isn't the real card font, so this may never happen on real
+cards. But it shows a noisy read with extra characters is snapped instead of refused,
+which the "partial reads are refused" rule doesn't cover. Left alone deliberately: the
+scanner reads real cards well and isn't to be redesigned without evidence from real
+scans. If a wrong-card scan is ever reported, start here.
+
 **Deliberately not done:**
 - The 10 remaining `npm audit` items are dev/build-time only (Vite 5 dev server,
   Tailwind 3). Clearing them means Vite 6+ and Tailwind 4, and the latter rewrites the

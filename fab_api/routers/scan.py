@@ -21,10 +21,8 @@ from fab_api.scan_engine import (
     _parse_code,
     _printings_for_display_id,
     _read_footer_code,
-    _rectify_card,
     _save_scan_debug_image,
     _snap_code,
-    _visual_match,
 )
 from fab_api.routers.cards import card_printings
 
@@ -109,7 +107,7 @@ def _record_scan_result(
     display_id = response.get("display_id")
     if not display_id and printing:
         set_id = printing.get("set_id")
-        # Prefer the recognized display_id when OCR provided it. For visual/name
+        # Prefer the recognized display_id when OCR provided it. For name-based
         # fallbacks there may be many printings, so leave display_id unset rather
         # than inventing one from a partial printing row.
         display_id = None if set_id else None
@@ -202,8 +200,8 @@ def scan_native(req: NativeScanRequest):
 
     Signals, strongest first:
       1. footer_crop OCR -> display_id exact set+number
-      2. full_image visual match -> card name candidate
-      3. title_crop OCR -> fuzzy card-name candidate
+      2. title_crop OCR -> fuzzy card-name candidate (needs easyocr)
+    full_image is only kept as a debug sample (the app still sends it).
     """
     try:
         debug_paths = []
@@ -262,19 +260,8 @@ def scan_native(req: NativeScanRequest):
             resp["scan_record_id"] = scan_id
             return resp
 
-        visual_matches = []
-        if full_img is not None:
-            try:
-                proc_img, rectify_status = _rectify_card(full_img)
-                visual_matches = _visual_match(proc_img, top_n=3, min_rarity="C")
-                for m in visual_matches:
-                    candidates.append({"source": "visual", **m})
-                if req.debug_save:
-                    debug_paths.append(_save_scan_debug_image(
-                        proc_img, f"native_full_{rectify_status}", "", None, None
-                    ))
-            except Exception as e:
-                _slog(f"[SCAN_NATIVE] visual_error={type(e).__name__}: {e}")
+        if full_img is not None and req.debug_save:
+            debug_paths.append(_save_scan_debug_image(full_img, "native_full", "", None, None))
 
         title_raw = ""
         title_matches = []
@@ -295,10 +282,6 @@ def scan_native(req: NativeScanRequest):
         for m in title_matches:
             if float(m["score"]) >= 0.85:
                 scores[m["name"]] = max(scores.get(m["name"], 0.0), float(m["score"]) * 0.90)
-        for vm in visual_matches:
-            for tm in title_matches:
-                if vm["name"] == tm["name"]:
-                    scores[vm["name"]] = max(scores.get(vm["name"], 0.0), 0.92)
 
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
         if ranked:
