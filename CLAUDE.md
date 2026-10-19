@@ -1,14 +1,15 @@
 # CLAUDE.md — FAB project working notes
 
-Operational focus for agents working in this repo. Pairs with `README.md` (human
-setup/run docs), `AGENTS.md` (Codex-specific handoff notes), and `agent_worklog.md`
-(running log of decisions + what was tried). Read all four before making changes.
+Operational focus for agents working in this repo. Pairs with `README.md` (public
+overview + setup) and `docs/DEVLOG.md` (running log of decisions + what was tried;
+add an entry, newest on top, for non-trivial changes). `AGENTS.md` just points here.
 
 ## What this is
 A Flesh and Blood TCG card-data app: ingest → PostgreSQL (bronze/silver/gold) →
-FastAPI → Vite/React frontend (hosted on Lovable, fallback self-hosted same-origin).
-A native Android scanner MVP now also exists under `fab-scanner-android/` for camera
-capture experiments; it talks to the same FastAPI backend.
+FastAPI → Vite/React frontend. The API serves the built frontend same-origin from
+`retro-data-display/dist` on https://fabmatrix.t4ngo.com (Lovable can still build the
+frontend repo, but the domain is what users hit — rebuild `dist` to ship frontend changes).
+A native Android scanner (`fab-scanner-android/`) talks to the same FastAPI backend.
 
 ```
 sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.silver_cards ──▶ gold.gold_cards ──▶ api.py ──▶ frontend
@@ -32,8 +33,9 @@ sources ──▶ ingest_*.py ──▶ bronze.*  ──(dbt)──▶ silver.si
 the pool) in `fab_api/core.py`; the OCR/visual scan engine — moved **verbatim**, logic
 untouched — in `fab_api/scan_engine.py`. GZip middleware compresses `/cards` (~11×);
 `/sets` + `/stats` send Cache-Control. `app.*` is the only non-regenerable data:
-`backup_app.py` dumps it nightly (user cron, 03:30) to `backups/` (30 kept, gitignored);
-restore via `sudo docker compose exec -T db psql -U <user> -d fab < backups/app_<ts>.sql`.
+`backup_app.py` dumps it to `backups/` (30 kept, gitignored) via the systemd user timer
+`fab-backup.timer` (03:30, `Persistent=true` so a run missed while the laptop was off
+fires at next boot — the old cron job never ran once; units in `deploy/`). Restore via `sudo docker compose exec -T db psql -U <user> -d fab < backups/app_<ts>.sql`.
 
 ## Data sources
 | Source | Gives | Notes |
@@ -41,11 +43,15 @@ restore via `sudo docker compose exec -T db psql -U <user> -d fab < backups/app_
 | **the-fab-cube** (GitHub JSON) | card catalogue spine: names, stats, text, images, set list | **Lags ~2 boosters** — unreliable for brand-new sets. |
 | **Cardmarket** (S3 bulk) | EUR prices, product catalogue | **No image field.** EUR only. |
 | **tcgcsv.com** | USD prices, names, set #, rarity, card text, images, for ALL sets incl. new | **Primary price/missing-set source.** Free, no key, no rate limit. Category **62** = FaB. Send a `User-Agent` header (401 otherwise). |
-| **JustTCG** (API) | USD prices + missing-set cards | **Dormant backup** — superseded by tcgcsv (was 100 req/day, ~7s/req). Scripts/tables kept but out of the default pipeline. |
 | **Riksbank** | EUR/SEK, USD/SEK rates | drives `price_sek`. |
 | **collectors_centre** (scraped fabtcg.com) | foil technique per printing | validates tier-2 foil matches. |
 
 `price_sek` = CM EUR → SEK if available, else tcgcsv USD → SEK.
+
+Retired (2026-10-19): **JustTCG** (USD API, 100 req/day — superseded by tcgcsv) and the
+perceptual-hash scanner ingest (superseded by ORB). Their scripts were deleted and
+`setup_db.py` drops their tables; the history is in `docs/DEVLOG.md`. Hand-maintained
+inputs live in `data/` (`fab_cm_manual.csv`, `collectors_centre_scrape.md`).
 
 ## Price match tiers (in `silver_cards`, surfaced as `gold.match_tier`)
 tcgcsv `productId` (= `tcgplayer_product_id`) is the **anchor key**: the tcgcsv USD price
@@ -126,7 +132,7 @@ so the derived pitch is aliased `derived_pitch` to avoid an ambiguous-column cla
 # DB must be up first (already on :5432 if the container is running):
 sudo docker compose up -d db          # docker needs sudo here (non-interactive will fail)
 .venv/bin/python setup_db.py          # idempotent schema
-.venv/bin/python ingest_bronze.py --no-justtcg   # catalogue + CM (network)
+.venv/bin/python ingest_bronze.py     # catalogue + CM (network)
 .venv/bin/python ingest_tcgcsv.py     # USD prices + missing sets (fast, no rate limit)
 ( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt run --profiles-dir . )
 ( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt test --profiles-dir . )
@@ -146,24 +152,15 @@ tunnel (`fab`) on the user's own domain t4ngo.com (bought at Cloudflare Registra
 `~/.cloudflared/config.yml` routes it to :8001; `start_fab.py` auto-detects the config
 and runs `cloudflared tunnel run fab`. The URL never changes → no Lovable resyncs, no
 gist churn, no zombie-URL replacement (that machinery remains as fallback if the config
-is ever missing). Frontend `.env` + endpoint gist point at the domain permanently.
-Also ~3-7× lower latency than trycloudflare. The paragraph below describes the legacy
-quick-tunnel behaviour, now only the fallback path:
+is ever missing). Frontend `.env`, the endpoint gist and the Android app's
+`DEFAULT_API_BASE` all point at the domain. ~3-7× lower latency than trycloudflare.
 
-The Cloudflare tunnel is now **persistent**: `start_fab.py` runs cloudflared detached
-(pidfile `tmp/logs/cloudflared.pid`) so it **survives API restarts** → the URL stays put and
-Lovable is **not** rebuilt on every restart. **Reuse is gated on an actual HTTP reachability
-check (`tunnel_reachable`), not just a live PID** — trycloudflare quick tunnels frequently
-keep the cloudflared process alive while the edge control-stream has died (log:
-`control stream encountered a failure` + `Retrying connection`). A live-but-dead tunnel was
-the cause of "restarted but the frontend can't connect": the old code reused it by PID. Now
-a zombie tunnel is torn down and replaced with a fresh one on the next start. Because that
-changes the URL, Lovable **is** synced on that restart (sync fires whenever the URL changed,
-even without `--sync-lovable`; a normal same-URL restart still causes no push/rebuild).
-`start_fab.py` also publishes every URL to a gist for the native app (`publish_endpoint`,
-always, no rebuild). Git timeouts are nonblocking so API startup does not hang on `git push`.
-URL changes on reboot, tunnel death (now auto-detected + replaced), or `--new-tunnel`.
-`--stop-tunnel` tears it down.
+Fallback only (no `~/.cloudflared/config.yml`): `start_fab.py` runs a detached
+trycloudflare quick tunnel (pidfile `tmp/logs/cloudflared.pid`) that survives API
+restarts. Reuse is gated on an HTTP reachability check (`tunnel_reachable`), not a live
+PID — quick tunnels often keep the process alive after the edge stream dies. A dead one is
+replaced, and because that changes the URL, the frontend `.env` is synced and the URL is
+published to the gist (`publish_endpoint`) that the Android app reads at launch.
 
 ## Uptime: the API runs as a systemd USER service (2026-08-09)
 The host is a **laptop** (Ubuntu 26.04), so the two things that took the site down were
@@ -189,9 +186,9 @@ token as git's credential helper — if a push prompts for a password, run `gh a
 once (GitHub rejects passwords). The `retro-data-display` frontend is a **separate** repo
 (its own remote); the parent repo gitignores it.
 
-Latest verified shape (2026-07-07): `gold.gold_cards` has 17,839 rows, **98.7% price
-coverage**, 0 delimited display IDs, all 13 dbt tests pass. The 239 unpriced rows are
-data-absent on both markets (135 tier-4 with no TCGplayer prices at all, 104 with no CM
+Latest verified shape (2026-10-19, data from the 2026-08-10 ingest): `gold.gold_cards`
+has 18,148 rows, **98.8% price coverage**, all 13 dbt tests pass. The 214 unpriced rows
+are data-absent on both markets (tier-4 with no TCGplayer prices at all, or no CM
 product under any matching name) — do NOT chase them with looser matching. Key coverage
 rules: a CM match with neither trend nor low is EXCLUDED from tiers 2/3/5 so the cascade
 continues (a priceless match must never block a priced lower tier); tier-2/5 price from
@@ -404,8 +401,10 @@ makes tabs look inconsistent). The native app mirrors this via a `Theme` palette
 - `fab-scanner-android/` is a CameraX MVP with card guide, footer sharpness gate, refocus,
   torch, zoom, hidden Advanced API URL field, pair-code field, and POST to `/scan/native`.
 - Android Studio/SDK are installed enough for local Gradle/ADB checks. Verified build:
-  `JAVA_HOME=/snap/android-studio/232/jbr GRADLE_USER_HOME=/home/tango/Projects/fab/fab-scanner-android/.gradle ./gradlew :app:assembleDebug`.
-  The debug APK has been installed and launched on the phone at least once.
+  `JAVA_HOME=/snap/android-studio/current/jbr GRADLE_USER_HOME=/home/tango/Projects/fab/fab-scanner-android/.gradle ./gradlew :app:assembleDebug`.
+  (`current` is the snap's stable symlink; numbered paths like `232/` vanish on update.)
+  **`GET /scanner-apk` serves the APK straight from `app/build/outputs/apk/debug/`** — never
+  delete that folder without rebuilding, or the live download breaks.
 
 ## Gotchas
 - Python 3.14 venv at `.venv`. Scanner deps currently installed: `numpy`,

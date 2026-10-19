@@ -1,189 +1,154 @@
-# FAB — Flesh and Blood card data app
+# The FAB Matrix
 
-**Live at https://fabmatrix.t4ngo.com** — a data pipeline + API + web frontend for
-Flesh and Blood TCG card data, prices, collection tracking, and card trading.
+**Live: [fabmatrix.t4ngo.com](https://fabmatrix.t4ngo.com)**
 
-- **Pipeline** (`ingest_bronze.py`, `ingest_tcgcsv.py`) downloads card data
-  (the-fab-cube), prices (Cardmarket + tcgcsv/TCGplayer), and exchange rates into
-  PostgreSQL `bronze.*`.
-- **Transform** (`fab_dbt/`, a dbt project) builds `silver.silver_cards` →
-  `gold.gold_cards`.
-- **API** (`api.py` wiring + `fab_api/` routers, FastAPI) serves `gold.gold_cards` at
-  `/cards`, `/sets`, `/stats`, admin quality endpoints, card scanning (`/scan/native`,
-  `/scan/code`), passwordless accounts + cardlists (`/auth`, `/cardlists`), price tools
-  (`/tools`), and trading (`/trade`). It also serves the built frontend at `/`.
-- **Frontend** (`retro-data-display/`, Vite + React + TS) — a retro card search UI and
-  scanner session page, hosted by **Lovable** from the `retro-data-display` GitHub repo.
-  It reaches the API over the persistent cloudflared tunnel.
-- **Native scanner MVP** (`fab-scanner-android/`) — Android CameraX companion app for
-  sharper phone scanning, pair-code sessions, and footer-code recognition.
+A price, collection and trading platform for the **Flesh and Blood** trading card game.
+It merges four messy public data sources into one priced catalogue of every printing
+(≈18,100 printings, **98.8 % priced**). On top of that it runs a web app for search,
+cardlists, player-to-player trading and selling to a store, plus a native Android card
+scanner.
 
-## Layout
+The data engineering is the core of the project. Card games print the same card many
+times over (set × edition × foil treatment × alt-art). The European (Cardmarket) and
+American (TCGplayer) markets name and split those printings differently, and neither one
+shares an ID with the card catalogue. Most of the code is about matching them up reliably.
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        A[the-fab-cube<br/>card catalogue]
+        B[Cardmarket<br/>EUR prices]
+        C[tcgcsv / TCGplayer<br/>USD prices + new sets]
+        D[Riksbank<br/>FX rates]
+        E[fabtcg.com<br/>foil techniques]
+    end
+    subgraph PostgreSQL
+        BR[(bronze<br/>raw, source-shaped)]
+        SI[(silver<br/>matching + pricing)]
+        GO[(gold<br/>API-ready)]
+        APP[(app<br/>users, lists, trades)]
+    end
+    A & B & C & D & E -->|Python ingest| BR
+    BR -->|dbt| SI -->|dbt| GO
+    GO --> API[FastAPI]
+    APP <--> API
+    API --> WEB[React web app]
+    API <--> AND[Android scanner]
+```
+
+## Features
+
+**Data pipeline**
+- Medallion architecture (bronze → silver → gold) in PostgreSQL, transformed with **dbt**
+  and covered by 13 data tests (identity fields, accepted values, no negative prices, no
+  malformed set or collector IDs).
+- **Five-tier price matching.** The TCGplayer product price is the *anchor* for each
+  printing. The Cardmarket product is chosen as the one whose EUR price (converted to SEK)
+  is closest to that anchor, among every product that shares the card's bare name. A
+  sanity guard rejects matches that are ≥20× off, so tokens can't pick up a hero's price.
+  Weaker tiers (expansion + foil heuristic, name aggregation, a manual crosswalk) fill the
+  gaps, and every row carries its `price_source` and `price_confidence`.
+- Sets the catalogue hasn't caught up with yet are backfilled from TCGplayer data, with
+  name normalisation (collector numbers, pitch colour and alt-art tags stripped into
+  separate fields).
+- A QA endpoint (`/admin/price-discrepancies`) compares EUR and USD in SEK and flags
+  divergent matches. During development it took bad matches from ~400 down to ~80, and
+  the ~80 left are genuine EU/US market gaps.
+
+**Web app** (React + TypeScript)
+- Search and filter every printing, with EUR/USD/SEK prices and a card detail view.
+- Passwordless email sign-in (magic links via Resend) and named cardlists.
+- **Trading post:** public trade lists and per-seller carts. Offers support counter-offers
+  and turn-taking, and cards are reserved with row locks so the same copy can't be
+  promised twice. Includes direct messages and email notifications.
+- **Sell to the store:** a configurable buylist (rates by condition and language, plus
+  block/percentage rules that can be capped by value). It gives non-binding quotes,
+  re-prices everything on the server, and lets the store counter line by line. Offers
+  print to A4 or PDF.
+- **Paste-a-list import:** turns a pasted text collection into exact printings. It never
+  guesses when look-alike printings differ in price; the user picks from artwork and price.
+
+**Android scanner** (Kotlin, CameraX)
+- Captures the card, waits until the footer text is sharp enough, and sends crops to the
+  API. Recognition is driven by OCR of the collector code, backed by title OCR and ORB
+  visual matching. A visual-only guess is never returned.
+- Pairs with the web app through a short code, and scanned cards appear on the web page
+  live.
+
+## Tech stack
+
+| Layer | Tools |
+|---|---|
+| Ingest | Python 3, `requests`, `psycopg2` |
+| Storage / transform | PostgreSQL 16 (Docker), dbt-postgres |
+| API | FastAPI, Uvicorn, pooled psycopg2 connections, GZip |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query |
+| Scanner | Kotlin, CameraX, OkHttp; Tesseract + OpenCV on the server |
+| Hosting | Cloudflare named tunnel, systemd user services, Resend email |
+
+## Repository layout
 
 ```
-api.py                 FastAPI app (also serves the frontend from dist/)
-ingest_bronze.py       Bronze-layer ingestion (downloads -> Postgres)
-ingest_image_hashes.py, ingest_orb_descriptors.py, load_collectors_centre.py
-setup_db.py            One-time DB/schema creation
-start_fab.py           Launch API + persistent Cloudflare tunnel (public URL)
-run_pipeline.sh        daily ingest/dbt/serve launcher
-docker-compose.yml     Local Postgres (db service)
-fab_dbt/               dbt project (profile fab_shop, profiles.yml included)
-retro-data-display/    frontend (build output -> dist/, served by the API)
-fab-scanner-android/   Android CameraX scanner MVP (open in Android Studio)
-tmp/                   gitignored: download cache, DB backups, logs, pgdata, cloudflared
+ingest_bronze.py          the-fab-cube catalogue, Cardmarket, Riksbank, manual crosswalk → bronze
+ingest_tcgcsv.py          TCGplayer USD prices + cards from sets missing in the catalogue
+load_collectors_centre.py foil technique per printing (from data/collectors_centre_scrape.md)
+ingest_orb_descriptors.py ORB image features for the scanner's visual fallback
+setup_db.py               idempotent schema for every bronze/app table (single source of truth)
+fab_dbt/                  dbt project: silver_cards (all matching logic) → gold_cards
+api.py                    FastAPI wiring; endpoints live in fab_api/routers/
+fab_api/                  routers (cards, trade, buylist, auth, …), list parser, scan engine
+start_fab.py              runs the API + Cloudflare tunnel
+run_pipeline.sh           daily ingest → dbt → serve launcher
+backup_app.py             dumps the app.* schema (users, lists, trades)
+deploy/                   systemd units (API service, nightly backup timer)
+data/                     small hand-maintained inputs (manual crosswalk, scraped foil data)
+docs/DEVLOG.md            development log: decisions, dead ends, and why
+fab-scanner-android/      Android CameraX scanner app
+retro-data-display/       web frontend (separate repo: GHT4ngo/retro-data-display)
 ```
 
-`tmp/` holds everything throwaway/regenerable: `tmp/data/` (download cache),
-`tmp/backup/` (DB snapshots + legacy files), `tmp/logs/`, `tmp/pgdata/` (Postgres
-volume), `tmp/bin/cloudflared`.
+## Running it locally
 
-## First-time setup
+Requirements: Python 3.11+, Docker, Node 20+.
 
 ```bash
-# 1. Secrets
-cp .env.example .env        # then fill in PG_PASSWORD + API keys
+# 1. Config
+cp .env.example .env                     # set PG_PASSWORD at minimum
 
-# 2. Python env
+# 2. Python
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-# optional (card scanning / image ingest, heavy):
-# .venv/bin/pip install -r requirements-ocr.txt
+# optional, for the scanner endpoints: .venv/bin/pip install -r requirements-ocr.txt
 
-# 3. Postgres (Docker)
-sudo docker compose up -d db     # Postgres on localhost:5432, data in tmp/pgdata/
-
-# 4. Create schema + load data + transform
+# 3. Database + data (the ingest downloads ~100 MB of source data)
+docker compose up -d db
 .venv/bin/python setup_db.py
-.venv/bin/python ingest_bronze.py --no-justtcg
+.venv/bin/python ingest_bronze.py
 .venv/bin/python ingest_tcgcsv.py
-( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt run --profiles-dir . )
-( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt test --profiles-dir . )
+( set -a; . ./.env; set +a; cd fab_dbt && ../.venv/bin/dbt run --profiles-dir . && ../.venv/bin/dbt test --profiles-dir . )
 
-# 5. Build the frontend (served by the API at /)
-cd retro-data-display
-npm install --legacy-peer-deps     # or: bun install
-npm run build                      # or: bun run build
-cd ..
+# 4. Frontend (the API serves the built app at /)
+git clone https://github.com/GHT4ngo/retro-data-display.git
+( cd retro-data-display && npm install --legacy-peer-deps && npm run build )
+
+# 5. Serve
+.venv/bin/uvicorn api:app --port 8001     # → http://localhost:8001
 ```
 
-## Run
+Without `RESEND_API_KEY` sign-in runs in dev mode: the magic link comes back in the API
+response instead of by email.
 
-Local only:
-```bash
-.venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8001
-# http://localhost:8001/  -> frontend ;  /cards /sets /stats -> API
-```
+`./run_pipeline.sh` wraps steps 3–5 for daily use (`--help` lists its modes). In
+production the API runs as a systemd user service (`deploy/fab-api.service`) behind a
+Cloudflare named tunnel.
 
-Public (share over the internet while the PC is on):
-```bash
-# one-time: get the Linux cloudflared binary
-curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-     -o tmp/bin/cloudflared && chmod +x tmp/bin/cloudflared
-
-.venv/bin/python start_fab.py
-```
-`start_fab.py` exposes the API at the **permanent URL `https://fabmatrix.t4ngo.com`** — a
-named Cloudflare tunnel (`fab`) on the owned domain t4ngo.com, configured in
-`~/.cloudflared/config.yml`. The URL never changes across restarts/reboots, and it is
-saved to `tmp/logs/tunnel_url.txt` for tooling. If the named-tunnel config is missing,
-`start_fab.py` falls back to an ephemeral `https://<random>.trycloudflare.com` quick
-tunnel. Direct `start_fab.py` does **not** push Git/Lovable unless called with
-`--sync-lovable` or `PUSH_LOVABLE=1` (with the fixed domain this is rarely needed).
-
-Frontend hosting — two options:
-- **Lovable (current):** the app is hosted by Lovable from the `retro-data-display` GitHub
-  repo. It runs on its own origin, so it needs the absolute API URL. The normal daily
-  `./run_pipeline.sh` path syncs `retro-data-display/.env` and pushes only when needed.
-- **Self-hosted (fallback):** FastAPI also serves `retro-data-display/dist` at `/`, so the
-  app is reachable on the same tunnel/origin as the API without Lovable.
-
-Daily commands:
-```bash
-./run_pipeline.sh                    # daily data refresh + serve + Lovable sync if needed
-./run_pipeline.sh --restart          # quick API/tunnel restart, no ingest/dbt, no push
-./run_pipeline.sh --restart --sync-lovable  # force a frontend API URL sync
-```
-
-## Android scanner MVP
-
-The browser scanner proved unreliable for tiny footer text: debug crops showed the footer
-region was in frame but too soft for OCR. The current scanner path is the native Android
-CameraX app, paired to the web scanner page with a short trade-session code.
-
-Native project:
-```text
-fab-scanner-android/
-```
-
-Backend endpoint:
-```text
-POST /scan/native
-POST /scan/session
-GET  /scan/records
-```
-
-Request signals:
-- `full_image` — full card guide crop, used for visual matching.
-- `footer_crop` — broad lower footer band, used for exact `display_id` OCR.
-- `title_crop` — top title strip, used for fuzzy title OCR.
-- `debug_save` — saves submitted crops and metadata.
-- `session_code` — lets the web page poll scans made from the phone.
-
-Debug output:
-```text
-tmp/scan_debug_samples/
-```
-
-Current flow:
-1. Open the web scanner page and start a trade session.
-2. Click **Pair phone** and use the short code in the Android app.
-3. Scan cards on the phone; the web page polls `/scan/records` and adds matches.
-
-The phone app hides the API URL under **Advanced**. Users should only need the pair code.
-This is a lightweight local session system, not real login/account/device auth.
-
-Build/install:
-```bash
-cd fab-scanner-android
-JAVA_HOME=/snap/android-studio/232/jbr \
-GRADLE_USER_HOME=/home/tango/Projects/fab/fab-scanner-android/.gradle \
-./gradlew :app:assembleDebug
-
-/home/tango/Android/Sdk/platform-tools/adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-Matching rules:
-- Footer code is the primary decision path. The backend searches several subwindows in the
-  broad footer crop because the code may be centered or left aligned.
-- OCR corrections handle common set-code mistakes, for example `R05 130` → `ROS130`.
-- Partial collector-number reads are refused so a fragment like `BET7` cannot snap to a
-  random `BET###` card.
-- Visual-only guesses are intentionally not returned; the scanner needs a footer code,
-  strong title match, or visual+title agreement.
+The Android app builds with `./gradlew :app:assembleDebug` from `fab-scanner-android/`
+(see its README).
 
 ## Notes
 
-- JustTCG is dormant backup. The normal pipeline uses tcgcsv.com for USD prices and
-  missing-set cards because it is fast and does not require an API key.
-- dbt tests live under `fab_dbt/tests/` and should pass after every pipeline change.
-  Current guardrails check identity fields, accepted edition/foil/tier values, non-negative
-  prices, and malformed set/display IDs.
-- The admin page shows price coverage and quality signals, not official set checklist
-  completeness. Important endpoints: `/admin/sets`, `/admin/quality`,
-  `/admin/price-discrepancies`.
-- If `run_pipeline.sh` fails at serve time with `address already in use` on port `8001`,
-  an old `start_fab.py`/uvicorn process is still running. Stop it before restarting the API.
-- If Android wireless debugging gets stuck after stale pairing, a full computer restart has
-  been the reliable reset.
-- The frontend was scaffolded with `bun`; `npm` needs `--legacy-peer-deps` because
-  `vite@8` is newer than `@vitejs/plugin-react-swc@3.11`'s declared peer range (the build
-  works regardless).
-
-## Roadmap: the "hub"
-
-The end goal is a self-contained install for an always-on / paid server. `docker-compose.yml`
-already runs Postgres; extend it with an `api` service (FastAPI + built frontend) and a
-one-shot `pipeline` job so the whole stack comes up with `docker compose up`. At that
-point swap the quick tunnel for a named Cloudflare Tunnel (stable domain) or the server's
-own reverse proxy.
+- `CLAUDE.md` holds the detailed working notes: matching rules, data quirks and
+  operational gotchas. `docs/DEVLOG.md` records how each part got that way, including
+  the approaches that didn't work.
+- Flesh and Blood™ is a trademark of Legend Story Studios. This project is unofficial
+  and not affiliated with them.

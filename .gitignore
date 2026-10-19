@@ -20,6 +20,7 @@ retro-data-display/
 fab_dbt/target/
 fab_dbt/logs/
 fab_dbt/dbt_packages/
+fab_dbt/.user.yml
 
 # Android scanner build/editor artifacts
 fab-scanner-android/.gradle/

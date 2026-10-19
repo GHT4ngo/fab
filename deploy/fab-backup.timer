@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly FAB app.* backup (catches up at boot if the laptop was off)
+
+[Timer]
+OnCalendar=*-*-* 03:30
+# The laptop is usually off at 03:30, so cron never fired once (Jul–Oct 2026).
+# Persistent runs a missed backup shortly after the next boot instead.
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

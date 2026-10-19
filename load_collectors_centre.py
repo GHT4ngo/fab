@@ -1,5 +1,5 @@
 """
-Parse FabTcg_manual_scrape.md and load into bronze.collectors_centre.
+Parse data/collectors_centre_scrape.md (pages saved from fabtcg.com) and load into bronze.collectors_centre.
 
 Each section in the file starts with a fabtcg.com URL, followed by scraped page
 content. Card rows are tab-separated: card_id, card_name, printing_technique, notes.
@@ -25,7 +25,7 @@ PG_PORT     = int(os.getenv("PG_PORT", 5432))
 PG_USER     = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "")
 
-SCRAPE_FILE = str(HERE / "FabTcg_manual_scrape.md")
+SCRAPE_FILE = str(HERE / "data" / "collectors_centre_scrape.md")
 
 GREEN = "\033[32m"
 CYAN  = "\033[36m"
@@ -159,7 +159,7 @@ def parse_scrape(filepath: str) -> list[tuple]:
 
 
 def load(rows: list[tuple]) -> None:
-    info(f"Connecting to PostgreSQL (fab)...")
+    info("Connecting to PostgreSQL (fab)...")
     try:
         conn = psycopg2.connect(
             host=PG_HOST, port=PG_PORT,

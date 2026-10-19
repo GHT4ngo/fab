@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADB="${ANDROID_HOME:-$HOME/Android/Sdk}/platform-tools/adb"
-JAVA_HOME="${JAVA_HOME:-/snap/android-studio/232/jbr}"
-GRADLE_USER_HOME="${GRADLE_USER_HOME:-/tmp/fab-gradle}"
+JAVA_HOME="${JAVA_HOME:-/snap/android-studio/current/jbr}"
+GRADLE_USER_HOME="${GRADLE_USER_HOME:-$ROOT_DIR/.gradle}"
 APK="$ROOT_DIR/app/build/intermediates/apk/debug/app-debug.apk"
 APP_ID="com.fabscanner.app.debug"
 ACTIVITY="com.fabscanner.app.MainActivity"

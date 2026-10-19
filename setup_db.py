@@ -161,49 +161,13 @@ CREATE TABLE IF NOT EXISTS bronze.cardmarket_prices (
     PRIMARY KEY (idproduct, loaded_date)
 );
 
--- ── Bronze: JustTCG / TCGPlayer prices per printing ──────────────────────────
--- One row per (tcgplayer_product_id x printing x condition).
--- printing matches JustTCG variant strings e.g. "1st Edition Cold Foil", "Normal".
--- fetched_at is updated on each upsert to support staleness checks.
-CREATE TABLE IF NOT EXISTS bronze.justtcg_prices (
-    tcgplayer_product_id  TEXT        NOT NULL,
-    printing              TEXT        NOT NULL,
-    condition             TEXT        NOT NULL,
-    price_usd             NUMERIC(10,2),
-    fetched_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tcgplayer_product_id, printing, condition)
-);
-
-CREATE INDEX IF NOT EXISTS justtcg_prices_tcg_id ON bronze.justtcg_prices (tcgplayer_product_id);
-
--- ── Bronze: JustTCG set map (user-maintained, loaded from justtcg_sets.csv) ───
--- One row per set that the-fab-cube is missing and we source from JustTCG instead.
--- justtcg_set_id is filled in by ingest_justtcg_sets.py after resolving it via /sets.
--- idexpansion is optional (Cardmarket expansion id) for precise EUR pricing.
-CREATE TABLE IF NOT EXISTS bronze.justtcg_set_map (
-    set_code        TEXT        PRIMARY KEY,
-    set_name        TEXT        NOT NULL,
-    edition         TEXT        NOT NULL DEFAULT 'N',
-    release_date    DATE,
-    justtcg_set_id  TEXT,
-    idexpansion     INTEGER
-);
-
--- ── Bronze: JustTCG card catalogue for missing sets ──────────────────────────
--- One row per TCGplayer product (card printing) discovered via JustTCG /cards.
--- Prices for these cards live in bronze.justtcg_prices (shared with the price refresh).
-CREATE TABLE IF NOT EXISTS bronze.justtcg_cards (
-    tcgplayer_product_id  TEXT        PRIMARY KEY,
-    name                  TEXT        NOT NULL,
-    pitch                 TEXT,
-    number                TEXT,
-    rarity                TEXT,
-    set_code              TEXT        NOT NULL,
-    set_name              TEXT,
-    fetched_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS justtcg_cards_set_code ON bronze.justtcg_cards (set_code);
+-- ── Retired sources ─────────────────────────────────────────────────────────
+-- JustTCG (superseded by tcgcsv.com) and the perceptual-hash scanner experiment
+-- (superseded by ORB descriptors). Nothing reads these; drop them if present.
+DROP TABLE IF EXISTS bronze.justtcg_prices;
+DROP TABLE IF EXISTS bronze.justtcg_set_map;
+DROP TABLE IF EXISTS bronze.justtcg_cards;
+DROP TABLE IF EXISTS bronze.card_image_hashes;
 
 -- ── Bronze: tcgcsv.com set list (TCGplayer groups, FaB = category 62) ─────────
 -- One row per set. abbreviation is the TCGplayer set code (e.g. OMN, PEN).
@@ -575,9 +539,6 @@ def main():
     ok("bronze.fab_cm_manual")
     ok("bronze.collectors_centre")
     ok("bronze.fab_expansions")
-    ok("bronze.justtcg_prices")
-    ok("bronze.justtcg_set_map")
-    ok("bronze.justtcg_cards")
     ok("bronze.tcgcsv_groups")
     ok("bronze.tcgcsv_cards")
     ok("bronze.tcgcsv_prices")

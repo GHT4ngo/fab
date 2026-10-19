@@ -1,0 +1,9 @@
+[Unit]
+Description=FAB Matrix — dump the app.* schema (users, lists, trades, buylist)
+# app.* is the only data that can't be rebuilt from the sources.
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/tango/Projects/fab
+ExecStart=/home/tango/Projects/fab/.venv/bin/python backup_app.py

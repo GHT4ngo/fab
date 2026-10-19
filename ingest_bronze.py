@@ -6,21 +6,19 @@ Sources:
   2. The Fab Cube (GitHub)   — set catalogue with collectors-centre URLs
   3. Cardmarket game 16      — product catalogue (name→idProduct) + EUR prices
   4. Riksbank                — EUR/SEK and USD/SEK exchange rates
-  5. Manual CSV              — printing_unique_id → idProduct crosswalk (SSMS export)
+  5. Manual CSV              — printing_unique_id → idProduct crosswalk (data/fab_cm_manual.csv)
   6. Auto-match              — derive set_id+edition → idExpansion for unmapped sets
 
-Note: collectors centre (fabtcg.com) is populated manually — see bronze.collectors_centre.
-      The table structure is in place; load data by saving pages and running
-      a separate import script when needed.
+USD prices and sets the-fab-cube hasn't caught up with come from ingest_tcgcsv.py;
+foil techniques per printing come from load_collectors_centre.py.
 
 Run order:
   python setup_db.py        (first time only, or after schema changes)
-  python ingest_bronze.py   (daily, then run 'dbt run')
+  python ingest_bronze.py   (daily)
+  python ingest_tcgcsv.py   (daily, then 'dbt run')
 
-Matching strategy (three tiers, in priority order):
-  1. EXACT  — fab_cm_manual: printing_unique_id → idProduct (manual SSMS export)
-  2. AUTO   — fab_expansions + collectors_centre: join by (idExpansion, cm_name, foil)
-  3. FALLBACK — name+pitch aggregation across all expansions (last resort)
+This script only lands raw data. All price matching (anchored / auto / fallback /
+tcgcsv / manual tiers) happens in fab_dbt/models/silver/silver_cards.sql.
 """
 
 import requests
@@ -113,8 +111,8 @@ CM_PRODUCTS_LOCAL = os.path.join(DATA_DIR, "products_singles_16.json")
 CM_PRICES_URL     = "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_16.json"
 CM_PRICES_LOCAL   = os.path.join(DATA_DIR, "price_guide_16.json")
 
-# Manual printing → Cardmarket product crosswalk (exported from SSMS)
-MANUAL_CSV = str(HERE / "fab_cm_manual.csv")
+# Manual printing → Cardmarket product crosswalk (tier-5 last resort)
+MANUAL_CSV = str(HERE / "data" / "fab_cm_manual.csv")
 
 # Riksbank exchange rate pairs
 RIKSBANK_PAIRS = [
@@ -172,19 +170,12 @@ def download(url, local_file, label):
     return done
 
 
-def cm_lookup_name(card_name, pitch):
-    """Build Cardmarket-format name: append pitch colour in parentheses."""
-    pitch_map = {"1": "Red", "2": "Yellow", "3": "Blue"}
-    colour = pitch_map.get(str(pitch) if pitch else "")
-    return f"{card_name} ({colour})" if colour else card_name
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  1 / 8 — The Fab Cube card printings
+#  1 / 7 — The Fab Cube card printings
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ingest_fab_cards(conn):
-    print_section("1 / 8 — The Fab Cube: card printings")
+    print_section("1 / 7 — The Fab Cube: card printings")
 
     if is_remote_newer(FAB_CUBE_URL, FAB_CUBE_LOCAL) or not os.path.exists(FAB_CUBE_LOCAL):
         info("Downloading card-flattened.json from GitHub...")
@@ -256,11 +247,11 @@ def ingest_fab_cards(conn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  2 / 8 — The Fab Cube set catalogue
+#  2 / 7 — The Fab Cube set catalogue
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ingest_fab_sets(conn):
-    print_section("2 / 8 — The Fab Cube: set catalogue")
+    print_section("2 / 7 — The Fab Cube: set catalogue")
 
     if is_remote_newer(FAB_SETS_URL, FAB_SETS_LOCAL) or not os.path.exists(FAB_SETS_LOCAL):
         info("Downloading set.json from GitHub...")
@@ -312,7 +303,7 @@ def ingest_fab_sets(conn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  3 / 8 — Cardmarket product catalogue
+#  3 / 7 — Cardmarket product catalogue
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ingest_cardmarket_products(conn):
@@ -385,7 +376,7 @@ def ingest_cardmarket_products(conn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  4 / 8 — Cardmarket price guide
+#  4 / 7 — Cardmarket price guide
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ingest_cardmarket_prices(conn):
@@ -452,7 +443,7 @@ def ingest_cardmarket_prices(conn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  5 / 8 — Riksbank exchange rates
+#  5 / 7 — Riksbank exchange rates
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ingest_exchange_rates(conn):
@@ -496,11 +487,11 @@ def ingest_exchange_rates(conn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  6 / 8 — Manual crosswalk (SSMS export)
+#  6 / 7 — Manual crosswalk (SSMS export)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ingest_cm_manual(conn):
-    print_section("6 / 7 — Manual crosswalk (fab_cm_manual.csv)")
+    print_section("6 / 7 — Manual crosswalk (data/fab_cm_manual.csv)")
 
     if not os.path.exists(MANUAL_CSV):
         warn(f"Manual CSV not found at {MANUAL_CSV} — skipping")
@@ -690,179 +681,10 @@ def build_fab_expansions(conn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  8 / 8 — Fetch JustTCG / TCGPlayer USD prices
-# ─────────────────────────────────────────────────────────────────────────────
-
-JUSTTCG_BASE    = "https://api.justtcg.com/v1"
-JUSTTCG_BATCH   = 20          # free plan: up to 20 IDs per POST
-JUSTTCG_REFETCH = 7           # re-fetch after this many days
-JUSTTCG_SLEEP   = 7           # seconds between requests (free plan: 10 req/min)
-
-
-def fetch_justtcg_prices(conn):
-    print_section("8 / 8 — JustTCG prices (TCGPlayer USD)")
-
-    api_key = os.getenv("JUSTTCG_API_KEY", "")
-    if not api_key:
-        warn("JUSTTCG_API_KEY not set in .env — skipping")
-        return
-
-    headers = {"x-api-key": api_key}
-    cur = conn.cursor()
-
-    # Build the work queue in PRIORITY ORDER so a limited daily quota is spent on
-    # the most valuable cards first (missing-set cards are handled earlier by
-    # ingest_justtcg_sets.py; this covers the the-fab-cube cards):
-    #   0. cards with no price at all (no Cardmarket EUR and no JustTCG USD)
-    #   1. cards that have a price but no JustTCG USD price
-    #   2. cards whose USD price is stale (a refresh/update)
-    # Cards with a fresh USD price (< JUSTTCG_REFETCH days) are skipped entirely.
-    # Price status comes from the previous build of gold.gold_cards; on the very
-    # first run that table won't exist yet, so fall back to a simple stale check.
-    cur.execute("SELECT to_regclass('gold.gold_cards') IS NOT NULL")
-    have_gold = cur.fetchone()[0]
-
-    if have_gold:
-        cur.execute("""
-            WITH ids AS (
-                SELECT DISTINCT (p.raw_data->>'tcgplayer_product_id') AS tcg_id
-                FROM bronze.fab_printings p
-                WHERE p.raw_data->>'tcgplayer_product_id' ~ '^[0-9]+$'
-            ),
-            gstatus AS (
-                SELECT g.tcgplayer_product_id::text         AS tcg_id,
-                       bool_or(g.has_price)                 AS any_price,
-                       bool_or(g.tcg_price_usd IS NOT NULL) AS any_usd
-                FROM gold.gold_cards g
-                WHERE g.tcgplayer_product_id IS NOT NULL
-                GROUP BY g.tcgplayer_product_id
-            ),
-            last_fetch AS (
-                SELECT tcgplayer_product_id AS tcg_id, MAX(fetched_at) AS last_at
-                FROM bronze.justtcg_prices
-                GROUP BY tcgplayer_product_id
-            )
-            SELECT i.tcg_id
-            FROM ids i
-            LEFT JOIN gstatus    s ON s.tcg_id = i.tcg_id
-            LEFT JOIN last_fetch f ON f.tcg_id = i.tcg_id
-            WHERE f.last_at IS NULL                              -- never fetched
-               OR f.last_at < NOW() - INTERVAL '%s days'         -- or stale
-            ORDER BY
-                CASE
-                    WHEN COALESCE(s.any_price, false) = false THEN 0  -- no price at all
-                    WHEN COALESCE(s.any_usd,   false) = false THEN 1  -- has price, no USD
-                    ELSE 2                                            -- refresh stale USD
-                END,
-                i.tcg_id
-        """, (JUSTTCG_REFETCH,))
-    else:
-        cur.execute("""
-            SELECT DISTINCT p.raw_data->>'tcgplayer_product_id' AS tcg_id
-            FROM bronze.fab_printings p
-            WHERE p.raw_data->>'tcgplayer_product_id' ~ '^[0-9]+$'
-              AND NOT EXISTS (
-                  SELECT 1 FROM bronze.justtcg_prices jp
-                  WHERE jp.tcgplayer_product_id = p.raw_data->>'tcgplayer_product_id'
-                    AND jp.fetched_at > NOW() - INTERVAL '%s days'
-              )
-            ORDER BY tcg_id
-        """, (JUSTTCG_REFETCH,))
-    pending = [r[0] for r in cur.fetchall()]
-
-    if not pending:
-        ok(f"All TCGPlayer prices up to date (< {JUSTTCG_REFETCH} days old)")
-        cur.close()
-        return
-
-    info(f"{len(pending)} products need fetching (new or stale > {JUSTTCG_REFETCH} days)")
-
-    fetched_products = 0
-    stored_variants  = 0
-    set_counts       = {}   # set_name -> cards fetched
-    daily_remaining  = None
-
-    for batch_start in range(0, len(pending), JUSTTCG_BATCH):
-        batch = pending[batch_start : batch_start + JUSTTCG_BATCH]
-
-        try:
-            resp = requests.post(
-                f"{JUSTTCG_BASE}/cards",
-                headers=headers,
-                json=[{"tcgplayerId": tid} for tid in batch],
-                timeout=15,
-            )
-        except Exception as e:
-            err(f"JustTCG request failed: {e}")
-            break
-
-        if resp.status_code != 200:
-            err(f"JustTCG {resp.status_code}: {resp.text[:200]}")
-            break
-
-        body = resp.json()
-        meta = body.get("_metadata", {})
-        daily_remaining = meta.get("apiDailyRequestsRemaining")
-
-        for card in body.get("data", []):
-            tcg_id   = str(card.get("tcgplayerId", ""))
-            set_name = card.get("set_name", "?")
-            set_counts[set_name] = set_counts.get(set_name, 0) + 1
-
-            for v in card.get("variants", []):
-                printing  = v.get("printing", "")
-                condition = v.get("condition", "")
-                price     = v.get("price")
-                if not printing or not condition:
-                    continue
-                cur.execute("""
-                    INSERT INTO bronze.justtcg_prices
-                        (tcgplayer_product_id, printing, condition, price_usd, fetched_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (tcgplayer_product_id, printing, condition)
-                    DO UPDATE SET price_usd  = EXCLUDED.price_usd,
-                                  fetched_at = EXCLUDED.fetched_at
-                """, (tcg_id, printing, condition, price))
-                stored_variants += 1
-
-            fetched_products += 1
-
-        conn.commit()
-        progress(fetched_products, len(pending),
-                 label=f"variants={stored_variants:,}  daily_left={daily_remaining}")
-
-        # Respect rate limit: free plan allows 10 requests/minute
-        time.sleep(JUSTTCG_SLEEP)
-
-        if daily_remaining is not None and daily_remaining <= 3:
-            warn(f"Daily limit nearly reached ({daily_remaining} remaining) — stopping early")
-            break
-
-    print()
-    ok(f"JustTCG: {fetched_products} products, {stored_variants} variants stored")
-
-    # Per-set breakdown (top 15 by card count)
-    if set_counts:
-        top = sorted(set_counts.items(), key=lambda x: -x[1])[:15]
-        for sn, cnt in top:
-            info(f"  {sn}: {cnt}")
-
-    cur.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    import argparse
-    ap = argparse.ArgumentParser(description="FaB bronze ingestion")
-    ap.add_argument("--no-justtcg", action="store_true",
-                    help="skip the JustTCG USD price refresh (step 8)")
-    ap.add_argument("--justtcg-only", action="store_true",
-                    help="run ONLY the JustTCG price refresh (skip the catalogue/CM ingest)")
-    args = ap.parse_args()
-
     print_banner()
     start = time.time()
     info(f"Run started at {datetime.now():%Y-%m-%d %H:%M:%S}")
@@ -876,18 +698,13 @@ def main():
         sys.exit(1)
 
     try:
-        if args.justtcg_only:
-            fetch_justtcg_prices(conn)
-        else:
-            ingest_fab_cards(conn)
-            ingest_fab_sets(conn)
-            ingest_cardmarket_products(conn)
-            ingest_cardmarket_prices(conn)
-            ingest_exchange_rates(conn)
-            ingest_cm_manual(conn)
-            build_fab_expansions(conn)
-            if not args.no_justtcg:
-                fetch_justtcg_prices(conn)
+        ingest_fab_cards(conn)
+        ingest_fab_sets(conn)
+        ingest_cardmarket_products(conn)
+        ingest_cardmarket_prices(conn)
+        ingest_exchange_rates(conn)
+        ingest_cm_manual(conn)
+        build_fab_expansions(conn)
     except Exception as e:
         err(f"Pipeline error: {e}")
         import traceback; traceback.print_exc()

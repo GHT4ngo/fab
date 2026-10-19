@@ -620,11 +620,11 @@ private object Theme {
     val WARN     = Color.rgb(240, 95, 95)
 }
 
-private const val DEFAULT_API_BASE = "https://ties-immigration-save-sitemap.trycloudflare.com"
+private const val DEFAULT_API_BASE = "https://fabmatrix.t4ngo.com"
 
-// The backend runs behind an ephemeral trycloudflare URL that rotates on every reboot /
-// new tunnel. Rather than rebuild the app each time, start_fab.py publishes the live URL
-// to this public gist and we fetch it at launch. This is the always-latest raw URL, so it
-// never changes even as the endpoint content does.
+// Fallback discovery: the backend normally sits on the permanent domain above, but if it
+// ever has to fall back to an ephemeral trycloudflare tunnel, start_fab.py publishes the
+// live URL to this public gist and we fetch it at launch, so no rebuild is needed. This is
+// the always-latest raw URL, so it never changes even as the endpoint content does.
 private const val ENDPOINT_DISCOVERY_URL =
     "https://gist.githubusercontent.com/GHT4ngo/84b51c1df1551685fb9b151f684d979d/raw/endpoint.txt"

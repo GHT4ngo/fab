@@ -96,11 +96,10 @@ fi
 
 if [ "$PIPELINE" = "force" ]; then
   echo "-> Bronze catalogue (cards, sets, Cardmarket)..."
-  "$PY" ingest_bronze.py --no-justtcg
+  "$PY" ingest_bronze.py
 
   # tcgcsv.com — free, no-rate-limit TCGplayer mirror. Primary source for USD prices
-  # and for cards in sets the-fab-cube is missing. (JustTCG is a dormant backup, run
-  # by hand if ever needed.)
+  # and for cards in sets the-fab-cube is missing.
   echo "-> tcgcsv — cards + USD prices (all sets)..."
   "$PY" ingest_tcgcsv.py || echo "   (tcgcsv fetch failed — continuing with existing data)"
 

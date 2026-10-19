@@ -1,8 +1,11 @@
-# Agent worklog
+# Development log
 
 Running log of what's been done, what's planned, and what was tried but abandoned (and
 why). Newest entries on top. Keep this honest — failed attempts are the most valuable
-part. See `CLAUDE.md` for architecture and `README.md` for setup.
+part. See `../CLAUDE.md` for architecture and `../README.md` for setup.
+
+Entries are written as they happened, so older ones mention things later retired
+(JustTCG, the browser camera scanner, rotating trycloudflare tunnels).
 
 ---
 
@@ -296,8 +299,8 @@ start); quick-tunnel code kept as fallback. One-time sync: URL_FILE, endpoint gi
 frontend `.env` → the domain (final URL-driven Lovable rebuild ever). All routes verified
 200 on the domain, ~3-7× faster than trycloudflare (40-60 ms vs 150-340 ms).
 **Domain verified in Resend same day** → `RESEND_FROM="FAB Matrix <noreply@t4ngo.com>"`;
-delivery to a non-owner address verified end-to-end (`emailed: true` to
-christofer@alphaspel.se). Multi-user accounts + trading fully unlocked.
+delivery to a non-owner address verified end-to-end (`emailed: true` to a second,
+unrelated mailbox). Multi-user accounts + trading fully unlocked.
 GOTCHA: `.env` is sourced as SHELL by run_pipeline.sh — RESEND_FROM must be quoted
 (unquoted `<` = syntax error that silently aborts `--restart`, leaving the old API
 process running with stale env; diagnosed via process start-time vs .env mtime).

@@ -1,73 +1,50 @@
-# FaB Scanner Android MVP
+# FAB Matrix — Android scanner
 
-Native CameraX scanner companion for the FaB backend.
+Native CameraX companion app for the FAB Matrix backend. Scanning on the phone gives
+much sharper frames than browser video. The collector code in a card's footer is tiny,
+and in a browser stream it was too soft to OCR.
 
-This is intentionally small: one Android activity captures sharper camera frames,
-gates on footer sharpness, crops the full card/footer/title regions, and posts
-them to the existing backend `/scan/native` endpoint.
+## How it works
 
-## Requirements
+1. On the web app's **Scan** page, click **Pair phone** to get a short pair code.
+2. Enter the code in the app. It's saved, and the pairing row hides itself afterwards.
+3. Pass cards through the on-screen guide. The app waits until the footer strip is sharp
+   enough (a Laplacian sharpness gate), then posts three crops to `POST /scan/native`:
+   - `footer_crop`: a broad band along the bottom, used for exact collector-code OCR
+   - `title_crop`: the title strip, used for fuzzy name OCR
+   - `full_image`: the whole card, used for ORB visual matching
+4. Matches show up live on the paired web page, which polls `/scan/records`.
 
-- Android Studio
-- Android SDK installed through Android Studio
-- Android phone with USB debugging enabled
-- Local backend reachable from the phone
+Server-side decision order: an exact footer `display_id` read (with corrections for
+common OCR confusions such as `R05` → `ROS`), then a strong title match, then visual and
+title agreeing. A visual-only guess is never returned, and partial codes are refused.
 
-This workspace currently does not have Java, Gradle, or the Android SDK
-installed, so build/run from Android Studio.
+Also included: torch, a fixed 2× zoom so the camera can sit at a sharper focus distance,
+tap-to-refocus, and an **Advanced** panel that shows the API
+URL and the live sharpness readout.
 
-## Open
+## API address
 
-Open this folder in Android Studio:
+The default is `https://fabmatrix.t4ngo.com`. At launch the app also reads the current
+URL from a public gist that `start_fab.py` keeps up to date, so the app keeps working if
+the backend ever falls back to a temporary tunnel. An override set under **Advanced**
+wins for the rest of the session.
+
+## Build
+
+Requires Android Studio (for the SDK and its bundled JDK). minSdk 26, targetSdk 35.
 
 ```bash
-/home/tango/Projects/fab/fab-scanner-android
+JAVA_HOME=/snap/android-studio/current/jbr \
+GRADLE_USER_HOME=$PWD/.gradle \
+./gradlew :app:assembleDebug
+
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Let Android Studio sync Gradle, then run `app` on a connected Android phone.
+`./debug_phone.sh` builds, installs, launches and tails the logs on a connected phone.
+The backend also serves the latest debug build at `GET /scanner-apk`. The web Scan page
+links to it, so testers don't need Android Studio.
 
-## Backend URL
-
-Default API base in `MainActivity.kt` is:
-
-```text
-http://10.0.2.2:8001
-```
-
-That works for the Android emulator. For a physical phone, use either:
-
-- the current quick-tunnel URL, or
-- the LAN IP of this machine, e.g. `http://192.168.x.x:8001`
-
-For now, change `apiBase` in `MainActivity.kt` while testing.
-
-## Recognition Signals
-
-The app sends:
-
-- `full_image`: full card guide crop
-- `footer_crop`: bottom 7% strip of the card
-- `title_crop`: top title strip
-- `debug_save: true`
-
-Backend fusion order:
-
-1. footer OCR, exact `display_id`
-2. full-card visual match
-3. title OCR fuzzy match
-
-## Debug Output
-
-Backend saves native scan debug files to:
-
-```text
-/home/tango/Projects/fab/tmp/scan_debug_samples/
-```
-
-Each saved image has a matching `.txt` metadata file.
-
-## Current MVP Limits
-
-- The Android app currently parses the backend response with simple regexes.
-- It does not yet sync into the web cardlist UI.
-- The first target is proving camera quality and recognition confidence.
+Debug package id: `com.fabscanner.app.debug`. Scan crops and metadata are saved
+server-side under `tmp/scan_debug_samples/` when `debug_save` is set.

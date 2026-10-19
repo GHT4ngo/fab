@@ -458,9 +458,9 @@ def sync_lovable(tunnel_url):
         print(f"       git said: {err[:240]}")
     if "Authentication" in err or "could not read" in err or "terminal prompts disabled" in err:
         print(f"  {YELLOW}->{RESET}  Auth not set up. GitHub rejects passwords; run this ONCE:")
-        print(f"           gh auth setup-git")
+        print("           gh auth setup-git")
     print(f"  {YELLOW}->{RESET}  Manual deploy: update Lovable to {tunnel_url}, or run:")
-    print(f"           cd retro-data-display && git push origin main")
+    print("           cd retro-data-display && git push origin main")
 
 
 def main():

@@ -34,7 +34,7 @@ select
     cm_idproduct,
     match_tier,
     price_eur,                                          -- Cardmarket EUR (null if unmatched)
-    tcg_price_usd,                                      -- JustTCG USD (null if not fetched)
+    tcg_price_usd,                                      -- tcgcsv / TCGplayer USD (null if none)
     tcg_fetched_at,
     price_sek,
     cm_low_eur,                                         -- Cardmarket LOW (cheapest listing), null if none

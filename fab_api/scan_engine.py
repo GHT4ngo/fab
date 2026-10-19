@@ -63,7 +63,7 @@ def _crop_name_region(img: Image.Image) -> Image.Image:
     The frontend already crops + 2× scales the name region before sending,
     so we receive a pre-cropped image. Apply sharpening for easyocr.
     """
-    from PIL import ImageFilter, ImageEnhance
+    from PIL import ImageEnhance
     img = img.convert("RGB")
     img = ImageEnhance.Sharpness(img).enhance(2.0)
     img = ImageEnhance.Contrast(img).enhance(1.3)
@@ -135,7 +135,7 @@ def _rectify_card(img: Image.Image) -> tuple:
 
     Fallback: if no quad found, crop to the center 80% of the frame
     (where the UI overlay guides the user to place the card) — this still
-    gives Claude a much better image than the raw full frame.
+    gives the OCR and visual matcher a much better image than the raw full frame.
 
     Returns (image, "rectified" | "cropped" | "raw").
     """
@@ -192,7 +192,7 @@ def _normalize(text: str) -> str:
 
 def _fuzzy_match(raw_text: str, top_n: int = 5, cutoff: int = 40) -> list[dict]:
     """
-    Match OCR/Claude text against known card names using rapidfuzz WRatio.
+    Match OCR text against known card names using rapidfuzz WRatio.
     Returns empty list when no match exceeds the cutoff — callers can then
     show "not in database" rather than a wrong card.
     """
@@ -378,7 +378,7 @@ def _ocr_code_tesseract(img: Image.Image, fast: bool = False) -> str:
     except pytesseract.TesseractNotFoundError:
         raise ValueError(
             "Tesseract OCR is not installed. Run: sudo apt-get install -y tesseract-ocr"
-        )
+        ) from None
     except pytesseract.TesseractError:
         return ""
     return " | ".join(dict.fromkeys(reads))
