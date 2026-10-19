@@ -3,6 +3,7 @@
     "ms-python.python",
     "ms-python.vscode-pylance",
     "innoverio.vscode-dbt-power-user",
+    "ms-ossdata.vscode-pgsql",
     "charliermarsh.ruff"
   ]
 }
