@@ -451,37 +451,48 @@ def ingest_exchange_rates(conn):
 
     cur = conn.cursor()
 
+    # One date-range request per pair, newest rate wins. The anonymous Riksbank API
+    # allows only a handful of calls per minute; probing day-by-day back from today
+    # (weekends/holidays have no rate) burned through that and 429'd USD/SEK.
+    today = datetime.today().date()
+    start = today - timedelta(days=14)
     for series_id, series_id2, label in RIKSBANK_PAIRS:
-        fetched = False
-        for days_back in range(10):
-            check_date = (datetime.today() - timedelta(days=days_back)).date()
-            url = (
-                f"https://api.riksbank.se/swea/v1/CrossRates/"
-                f"{series_id}/{series_id2}/{check_date.isoformat()}"
-            )
+        url = (
+            f"https://api.riksbank.se/swea/v1/CrossRates/"
+            f"{series_id}/{series_id2}/{start.isoformat()}/{today.isoformat()}"
+        )
+        rows = []
+        for attempt in range(3):
             try:
                 r = requests.get(url, timeout=15)
-                if r.status_code == 200 and r.json():
-                    data       = r.json()[0]
-                    rate_value = float(data["value"])
-                    rate_date  = data["date"]
-                    cur.execute("""
-                        INSERT INTO bronze.exchange_rates
-                            (series_id, rate_date, rate_value, loaded_at)
-                        VALUES (%s, %s, %s, NOW())
-                        ON CONFLICT (series_id, rate_date) DO UPDATE
-                            SET rate_value = EXCLUDED.rate_value,
-                                loaded_at  = EXCLUDED.loaded_at
-                    """, (label, rate_date, rate_value))
-                    conn.commit()
-                    ok(f"{label}: {rate_value:.4f}  (date: {rate_date})")
-                    fetched = True
-                    break
             except Exception as e:
-                warn(f"Riksbank request failed for {label} on {check_date}: {e}")
+                warn(f"Riksbank request failed for {label}: {e}")
+                continue
+            if r.status_code == 429:
+                warn(f"Riksbank rate limit hit for {label} — waiting 20s")
+                time.sleep(20)
+                continue
+            if r.status_code == 200:
+                rows = r.json()
+            break
 
-        if not fetched:
-            err(f"Could not fetch rate for {label}")
+        if not rows:
+            err(f"Could not fetch rate for {label} (keeping the last stored rate)")
+            continue
+
+        latest     = max(rows, key=lambda row: row["date"])
+        rate_value = float(latest["value"])
+        rate_date  = latest["date"]
+        cur.execute("""
+            INSERT INTO bronze.exchange_rates
+                (series_id, rate_date, rate_value, loaded_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (series_id, rate_date) DO UPDATE
+                SET rate_value = EXCLUDED.rate_value,
+                    loaded_at  = EXCLUDED.loaded_at
+        """, (label, rate_date, rate_value))
+        conn.commit()
+        ok(f"{label}: {rate_value:.4f}  (date: {rate_date})")
 
     cur.close()
 

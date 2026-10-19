@@ -4,7 +4,7 @@
 
 A price, collection and trading platform for the **Flesh and Blood** trading card game.
 It merges four messy public data sources into one priced catalogue of every printing
-(≈18,100 printings, **98.8 % priced**). On top of that it runs a web app for search,
+(≈18,600 printings, **99 % priced**). On top of that it runs a web app for search,
 cardlists, player-to-player trading and selling to a store, plus a native Android card
 scanner.
 

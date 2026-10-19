@@ -17,6 +17,8 @@
 #   ./run_pipeline.sh --stop       Stop the persistent Cloudflare tunnel.
 #   ./run_pipeline.sh --help
 #
+# If the fab-api systemd user service is installed, serving = `systemctl --user restart
+# fab-api` (the service owns the API; see deploy/). Otherwise start_fab.py runs it here.
 # The Cloudflare tunnel is persistent (see start_fab.py): a plain --restart reuses the
 # same URL. Normal pipeline runs sync Lovable when needed; quick restarts do not.
 set -euo pipefail
@@ -105,6 +107,9 @@ if [ "$PIPELINE" = "force" ]; then
 
   echo "-> dbt transformations..."
   ( cd fab_dbt && "../$DBT" run --profiles-dir . )
+  echo "-> dbt tests..."
+  ( cd fab_dbt && "../$DBT" test --profiles-dir . ) \
+    || echo "   !! dbt tests FAILED — gold was rebuilt anyway; check before trusting prices"
 
   mkdir -p "$(dirname "$MARKER")"; date +%F > "$MARKER"
   echo "-> Pipeline complete."
@@ -129,6 +134,24 @@ if [ "$SERVE" = "1" ]; then
     echo "-> Frontend build (same-origin, no Lovable sync)..."
     VITE_API_BASE_URL= npm --prefix retro-data-display run build
     export PUSH_LOVABLE=0
+  fi
+
+  # When the API runs as the systemd user service (deploy/fab-api.service), hand the
+  # restart to systemd. Launching start_fab.py by hand as well makes the two copies
+  # kill each other as "stale" over port 8001.
+  if [ "$NEW_TUNNEL" = "0" ] && systemctl --user is-enabled --quiet fab-api 2>/dev/null; then
+    echo "-> Restarting the fab-api service (systemd)..."
+    systemctl --user restart fab-api
+    for _ in $(seq 1 30); do
+      curl -fs -o /dev/null "http://localhost:${API_PORT:-8001}/stats" && break
+      sleep 1
+    done
+    if curl -fs -o /dev/null "http://localhost:${API_PORT:-8001}/stats"; then
+      echo "-> API is up. Logs: journalctl --user -u fab-api -f"
+    else
+      echo "!! API did not come up — see: journalctl --user -u fab-api -n 50"; exit 1
+    fi
+    exit 0
   fi
 
   if [ "$NEW_TUNNEL" = "1" ]; then

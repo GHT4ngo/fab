@@ -173,9 +173,10 @@ battery) — plus closing the terminal, since it used to run in the foreground.
   moment the service is stopped. `Restart=always`, `StartLimitIntervalSec=0` (never give up).
 - `loginctl enable-linger tango` is ON → it starts at boot without anyone logging in.
 - Manage it with `systemctl --user {status,restart,stop,start} fab-api`,
-  logs with `journalctl --user -u fab-api -f`. **`./run_pipeline.sh --restart` still works**
-  for a manual restart, but prefer `systemctl --user restart fab-api` now — starting a
-  second copy by hand collides on port 8001.
+  logs with `journalctl --user -u fab-api -f`. `run_pipeline.sh` detects the enabled
+  service and serves via `systemctl --user restart fab-api` (2026-10-19). Before that it
+  launched its own `start_fab.py`, and the two copies killed each other as "stale" over
+  port 8001. Never run `start_fab.py` by hand while the service is enabled.
 - Verified: inhibitor held (`sleep:idle:handle-lid-switch`, block), `kill -9` on uvicorn →
   service auto-restarted and the site was back inside 20 s.
 - A manual suspend from the GNOME menu still works — the inhibitor only blocks *automatic*
@@ -186,8 +187,8 @@ token as git's credential helper — if a push prompts for a password, run `gh a
 once (GitHub rejects passwords). The `retro-data-display` frontend is a **separate** repo
 (its own remote); the parent repo gitignores it.
 
-Latest verified shape (2026-10-19, data from the 2026-08-10 ingest): `gold.gold_cards`
-has 18,148 rows, **98.8% price coverage**, all 13 dbt tests pass. The 214 unpriced rows
+Latest verified shape (2026-10-19 ingest): `gold.gold_cards` has 18,605 rows, **99.1%
+price coverage**, all 13 dbt tests pass. The 169 unpriced rows
 are data-absent on both markets (tier-4 with no TCGplayer prices at all, or no CM
 product under any matching name) — do NOT chase them with looser matching. Key coverage
 rules: a CM match with neither trend nor low is EXCLUDED from tiers 2/3/5 so the cascade
