@@ -9,6 +9,106 @@ Entries are written as they happened, so older ones mention things later retired
 
 ---
 
+## 2026-10-19 — Presentation cleanup, two silent pipeline bugs, frontend health pass
+
+Goal: make the repo presentable as a portfolio project, check it still runs after two
+months untouched, and clean up. Both repos were already in sync with GitHub.
+
+**Backups had never run, not once.** The nightly `backup_app.py` cron job (03:30) had
+no log file at all and no cron journal entry. The laptop is off at night (85 boots in the
+journal), and cron does not catch up on missed jobs. The only dump was from 2026-07-05,
+when the script was written. Replaced it with a systemd user timer
+(`deploy/fab-backup.{service,timer}`, `Persistent=true`, so a missed run fires at next
+boot) and verified with a run through systemd. Low stakes in the end: `app.*` turned out
+to hold only test data. But the "nightly backups" claim in CLAUDE.md had been false for
+three months. Lesson: a scheduled job isn't working until its first output has been seen.
+
+**Dead code removed** (`c0fb913`, about 3,100 lines net):
+- The whole JustTCG path. tcgcsv had replaced it on 2026-06-28, and silver never read
+  its tables.
+- The perceptual-hash scanner ingest (ORB replaced it).
+- `card-face-association.json`, which nothing referenced, and the `cm_lookup_name`
+  helper.
+- `setup_db.py` now `DROP`s the four retired tables, so existing databases get cleaned.
+- Hand-maintained inputs moved to `data/`, and this log moved to `docs/`.
+- Three unused live API keys (JustTCG, Google Vision, Anthropic) were removed from
+  `.env`. Vision and Claude OCR left with the browser scanner on 2026-07-05; the keys
+  should be revoked at each provider.
+
+**Stale config that only worked by accident:**
+- The Android app's `DEFAULT_API_BASE` was still a dead trycloudflare URL. Scanning
+  only worked because the app reads the live URL from the gist at launch. It now points
+  at the permanent domain.
+- The documented Gradle command and `debug_phone.sh` used `/snap/android-studio/232/jbr`,
+  which an Android Studio update had removed. They now use the snap's stable
+  `current/` symlink.
+- Near-miss: I almost deleted `app/build/` as a regenerable build folder, but
+  `GET /scanner-apk` serves the live APK straight from `app/build/outputs/`. That folder
+  is now flagged in CLAUDE.md.
+
+**Docs:**
+- README rewritten as a project overview, with a mermaid architecture diagram.
+- AGENTS.md was rewritten as a short pointer to CLAUDE.md. It was very stale: it still
+  claimed the repo wasn't under git and quoted June data figures.
+- The Android README still said the app had no web sync and needed a hand-edited URL,
+  both long fixed. Rewritten.
+- `.env.example` now lists only variables the code actually reads.
+
+**The first full pipeline run in two months found two more bugs** (`2adb79f`):
+1. *USD/SEK rate silently stale.* The Riksbank step asked for one day at a time going
+   back from today (Mon, Sun, Sat, Fri) to skip weekends. The anonymous API allows only a
+   few calls per minute: EUR used 4, then USD got 429s, and the code treated any
+   non-200 response as "no rate that day". Every price that falls back to USD was being
+   converted at the August rate. Fix: one date-range request per currency, take the
+   newest row, and retry on 429. The retry was needed on the very first run.
+2. *Pipeline vs. systemd tug-of-war.* `run_pipeline.sh` launched its own `start_fab.py`,
+   which killed the service's API as a "stale process on port 8001". systemd restarted
+   its copy, and that one killed the pipeline's copy in turn. The site only blinked, but
+   the run ended with "API process exited unexpectedly". Fix: when `fab-api` is enabled,
+   serving means `systemctl --user restart fab-api` plus waiting for `/stats` to answer.
+   The pipeline also runs `dbt test` after `dbt run` now; before, it rebuilt gold without
+   checking it.
+
+Result: 18,605 printings, **99.1% priced** (was 98.8% on the August data), 13/13 tests pass.
+
+**Frontend** (retro-data-display). The site serves `dist` directly, so every build
+below was live as soon as it finished.
+- `d0329a5`: `npx knip` found 43 unused files and 33 unused packages, almost all Lovable
+  or shadcn scaffold that was never used. Removed them, plus both bun lockfiles, so
+  `package-lock.json` is the only lockfile. Side effect: `node_modules` had drifted to
+  Vite 8 while `package.json` asked for Vite 5. The reinstall brought it back to the
+  locked 5.4; noted, harmless. Also fixed a `useMemo` in `Index.tsx` whose
+  dependency (`data?.cards ?? []`) was a new array on every render while loading, so
+  every card was regrouped on each render.
+- `ee46924`: `npm audit fix` took 32 advisories down to 12.
+- `48e4213`: React Router 6 → 7.18.4, for an open-redirect advisory with no patched 6.x.
+  No code changes needed.
+- `1d16f52`: code splitting. Pages are lazy-loaded except Browse, and the framework
+  libraries sit in a `vendor` chunk. Largest chunk 613 → 231 kB; first load 176 → 143 kB
+  gzipped. Lazy chunks create a new failure mode: a tab left open across a deploy
+  requests old hashed file names and gets a blank page. `lazyPage` therefore reloads
+  once on a failed import. Tested by 404-ing the Trade chunk in headless Chromium: one
+  reload, then the Trade page rendered.
+- `3c2697b`: ESLint is at 0 warnings. To satisfy `only-export-components`, the auth
+  provider moved to its own file, CardItem's label tables went to `lib/cardDisplay.ts`,
+  and two unused shadcn re-exports were dropped. `cardDisplay.ts` was deliberately NOT
+  merged into `cardLabels.ts`: they hold different wording for different jobs.
+
+Verification without a test suite: playwright-core driving the Chromium already cached in
+`~/.cache/ms-playwright`. It deep-loads every route, clicks the nav, round-trips `/?q=`,
+and checks the back button and console errors. One false alarm along the way: my first
+"is this nav link active" check guessed at CSS class names and reported failures. The
+reliable signal is `aria-current="page"`, which was correct all along.
+
+**Deliberately not done:**
+- The 10 remaining `npm audit` items are dev/build-time only (Vite 5 dev server,
+  Tailwind 3). Clearing them means Vite 6+ and Tailwind 4, and the latter rewrites the
+  config and the locked `index.css`.
+- The new TCGplayer sets (Outbreak, Armory Deck: Min, …) list cards but no prices yet.
+  That's normal right after release, so nothing to fix.
+
+---
+
 ## 2026-08-04 (later) — Value-scoped buylist rules: rarity ≠ value
 
 Testing the paste importer on the real Monarch list against the LIVE store policy exposed
