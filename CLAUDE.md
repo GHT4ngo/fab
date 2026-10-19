@@ -225,8 +225,9 @@ schema (`setup_db.py` is canonical; `fab_api/routers/auth.py` self-migrates via
   to a non-owner address works → real multi-user accounts/trading are unlocked.
 - Self-hosted frontend has an **SPA fallback** (`SpaStaticFiles` in `api.py`): unknown
   paths serve `index.html`, so deep links like the emailed magic link work on the tunnel.
-- Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.tsx`
-  (AuthProvider), `src/pages/Account.tsx`, `AddToListButton`, `SaveScanToListButton`.
+- Frontend: `src/lib/auth.ts` (client + localStorage token), `src/hooks/useAuth.ts`
+  (context + `useAuth`), `src/components/AuthProvider.tsx` (the provider),
+  `src/pages/Account.tsx`, `AddToListButton`, `SaveScanToListButton`.
 
 ## Trading (Phase 4, live 2026-07-06; negotiation/locking rework 2026-07-08)
 - **Valuation rule (user-confirmed): `gold.trade_value_sek` = greatest(CM trend, CM low)
@@ -377,6 +378,41 @@ lives on `body` — do NOT put a solid `bg-background` on a page wrapper (it hid
 makes tabs look inconsistent). The native app mirrors this via a `Theme` palette +
 `cyberButton`/`styleInput` helpers and a HUD `CardGuideView`.
 
+## Frontend build + code health (2026-10-19)
+- **Shipping = `npm run build`.** The API serves `retro-data-display/dist` live, so a build
+  IS a deploy (no restart needed). Verify before building, not after.
+- **Lockfile: `package-lock.json` only** (bun lockfiles deleted). Install with
+  `npm install --legacy-peer-deps`. Package is named `fab-matrix-web`.
+- **Unused Lovable/shadcn scaffold was removed** (43 files, 33 packages, found with
+  `npx knip`). Only the `components/ui/*` primitives actually imported remain; add new ones
+  with the shadcn CLI when needed rather than restoring the old set. Re-run knip after
+  big removals to catch newly-dead code.
+- **Code splitting** (`App.tsx`): every page except Browse (`Index`, the landing page) is
+  `lazyPage(() => import(...))` inside one `<Suspense fallback={<PageLoading/>}>`;
+  `vite.config.ts` `manualChunks.vendor` = react, react-dom, react-router-dom,
+  @tanstack/react-query (long-cached across deploys). Largest chunk 231 kB, first load
+  ~143 kB gzipped (was one 613 kB bundle). New pages: add them via `lazyPage`, not a static
+  import. `lazyPage` reloads ONCE (sessionStorage flag `fab:chunk-reload`) when a chunk
+  import fails — an open tab from before a deploy asks for old hashed names that `dist` no
+  longer has. Verified by 404-ing the Trade chunk in headless Chromium.
+- **React Router 7** (`react-router-dom` 7.18.4; v6 has no fix for the open-redirect
+  advisory GHSA-wrjc-x8rr-h8h6). App uses only `BrowserRouter`, flat `Routes`,
+  `Link`/`NavLink` and the basic hooks — no data routers/loaders.
+- **ESLint is clean (0 errors, 0 warnings) — keep it that way.** `react-refresh/
+  only-export-components`: a `.tsx` file exports components only; constants/hooks/context
+  go in `.ts` files. Hence `hooks/useAuth.ts` + `components/AuthProvider.tsx`, and
+  `lib/cardDisplay.ts`.
+- **Two label modules, on purpose:** `lib/cardDisplay.ts` = compact grid/table/filter
+  labels + rarity colours ("1st Ed", "Standard"); `lib/cardLabels.ts` = exact wording that
+  identifies ONE printing in pickers, offers and print sheets ("1st Edition", "Non-foil").
+  Don't merge them — it would change UI text.
+- `npm audit`: 10 left, all dev/build-time only (Vite 5 dev-server esbuild, Tailwind 3's
+  braces/postcss-selector-parser). Clearing them needs Vite 6+ / Tailwind 4 (the latter
+  rewrites the config + `index.css` layer syntax) — deliberately deferred.
+- Quick live check without a test suite: playwright-core + the cached Chromium in
+  `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` — deep-load every route, click
+  the nav (`aria-current="page"` marks the active link), round-trip `/?q=`, back button.
+
 ## Scanner work
 - **Web scan page has NO browser camera anymore** (removed 2026-07-03). It is two paths:
   (1) pair the native app (download `/scanner-apk`, pair code via `/scan/session`, live sync
@@ -416,7 +452,7 @@ makes tabs look inconsistent). The native app mirrors this via a `Theme` palette
 - Wireless debugging can get stuck in stale pairing state. If repeated `adb pair/connect`
   attempts fail while the phone claims it is paired, a full computer restart has been the
   reliable reset.
-- Frontend scaffolded with bun; `npm install` needs `--legacy-peer-deps`.
+- Frontend uses npm (`package-lock.json`); `npm install` needs `--legacy-peer-deps`.
 - `start_fab.py` rewrites/pushes `retro-data-display/.env` when the tunnel URL changed
   (with `--sync-lovable`/`PUSH_LOVABLE=1`, or automatically on any restart where the URL
   changed — e.g. a dead tunnel was replaced). A same-URL restart pushes nothing (no rebuild
